@@ -62,7 +62,8 @@ mod tests {
         assert_eq!(ini::get(&ini, "Player", "SyncMode").as_deref(), Some("1"));
         assert_eq!(ini::get(&ini, "Player", "MaxFramerate").as_deref(), Some("60"));
         assert_eq!(ini::get(&ini, "Player", "ForceBloomOff").as_deref(), Some("1"));
-        assert_eq!(ini::get(&ini, "Plugin.PinMAME", "PinMAMEPath").as_deref(), Some("/data/pinmame"));
+        let pinmame = paths.pinmame().display().to_string();
+        assert_eq!(ini::get(&ini, "Plugin.PinMAME", "PinMAMEPath"), Some(pinmame));
         let small = default_vpx_ini(&paths, (1920, 1080));
         assert_eq!(ini::get(&small, "ScoreView", "ScoreViewWidth").as_deref(), Some("660"));
     }
