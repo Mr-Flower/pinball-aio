@@ -65,13 +65,16 @@ packaging/build-appimage.sh .     # solo Linux
 ## Licenze e note legali
 
 - **Questo launcher** è sotto licenza MIT (vedi `LICENSE`), è gratuito e non contiene codice
-  né binari di VPinballX, PinMAME o VPinFE: li scarica non modificati dalle loro release
+  né programmi di VPinballX, PinMAME o VPinFE: li scarica non modificati dalle loro release
   ufficiali su GitHub, sul computer dell'utente, e li avvia come programmi separati.
 - **VPinballX** è distribuito con licenza GPLv3+ e, per le parti più vecchie, con una licenza
   di tipo "old MAME" che ne vieta la vendita e l'uso commerciale. **PinMAME** (incluso nel
   motore) ha licenza BSD-3-Clause e "old MAME", anch'essa non commerciale. **VPinFE** è MIT.
   Chi usa questo launcher usa quei programmi alle condizioni delle loro licenze: in
   particolare non va venduto né inserito in prodotti commerciali insieme a loro.
+- **L'icona** è quella di Visual Pinball X, usata per indicare il motore che il launcher
+  avvia. Non è sotto licenza MIT: resta del team di Visual Pinball, alle condizioni della
+  loro licenza (vedi `assets/README.md`).
 - **Tavoli e ROM** non sono inclusi e non vengono scaricati. Sono opere protette da diritto
   d'autore: usa solo file che hai il diritto di usare.
 - **Schede e copertine** dei tavoli sono scaricate da VPinFE dai suoi archivi pubblici (VPS
@@ -80,4 +83,4 @@ packaging/build-appimage.sh .     # solo Linux
   Apache-2.0, BSD, ISC, Zlib, MPL-2.0 e simili; elenco con `cargo metadata`) e i font di egui
   (OFL-1.1 e Ubuntu Font Licence 1.0).
 - Progetto indipendente, non affiliato né approvato da Visual Pinball, PinMAME o VPinFE; i
-  loro nomi sono usati solo per indicare i programmi che il launcher scarica.
+  loro nomi e l'icona sono usati solo per indicare i programmi che il launcher scarica.

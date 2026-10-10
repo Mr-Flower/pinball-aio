@@ -9,7 +9,9 @@ trap 'rm -rf "$work"' EXIT
 appdir="$work/PinballAIO.AppDir"
 install -Dm755 target/release/pinball-aio "$appdir/usr/bin/pinball-aio"
 install -m755 packaging/AppRun "$appdir/AppRun"
-install -m644 packaging/pinball-aio.desktop packaging/pinball-aio.svg "$appdir/"
+install -m644 packaging/pinball-aio.desktop "$appdir/"
+install -m644 assets/vpinball.png "$appdir/pinball-aio.png"
+install -m644 assets/vpinball.png "$appdir/.DirIcon"
 
 curl -fsSL -o "$work/appimagetool" \
   https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage

@@ -19,7 +19,7 @@ use update::{Outcome, Progress, VPINBALL, VPINFE};
 
 /// Aggiorna i due programmi e scrive la configurazione. Restituisce l'eseguibile di VPinFE.
 /// Se un controllo fallisce ma il programma è già installato si prosegue con quello che c'è.
-fn prepare(paths: &Paths, report: &dyn Fn(Progress)) -> Result<PathBuf> {
+fn prepare(paths: &Paths, screen: (u32, u32), report: &dyn Fn(Progress)) -> Result<PathBuf> {
     paths.create_all().with_context(|| format!("impossibile creare {}", paths.root.display()))?;
     for component in [&VPINBALL, &VPINFE] {
         match update::update(paths, component, report) {
@@ -32,7 +32,7 @@ fn prepare(paths: &Paths, report: &dyn Fn(Progress)) -> Result<PathBuf> {
         }
     }
     let vpx = update::exe_path(paths, &VPINBALL).ok_or_else(|| anyhow!("VPinballX non trovato"))?;
-    config::write(paths, &vpx).context("impossibile scrivere la configurazione")?;
+    config::write(paths, &vpx, screen).context("impossibile scrivere la configurazione")?;
     let vpinfe = update::exe_path(paths, &VPINFE).ok_or_else(|| anyhow!("VPinFE non trovato"))?;
     prepare_tables(paths, &vpinfe, report);
     Ok(vpinfe)
@@ -116,6 +116,17 @@ fn manager_url(paths: &Paths) -> (u16, String) {
     (port, format!("http://localhost:{port}/"))
 }
 
+const FALLBACK_SCREEN: (u32, u32) = (1920, 1080);
+
+/// Risoluzione del monitor in pixel; è nota solo dopo che la finestra è comparsa.
+fn screen_size(ctx: &egui::Context) -> (u32, u32) {
+    let scale = ctx.native_pixels_per_point().unwrap_or(1.0);
+    match ctx.input(|i| i.viewport().monitor_size) {
+        Some(size) if size.x >= 640.0 => ((size.x * scale).round() as u32, (size.y * scale).round() as u32),
+        _ => FALLBACK_SCREEN,
+    }
+}
+
 #[derive(Default)]
 struct State {
     text: String,
@@ -141,12 +152,15 @@ struct App {
     folder: String,
     folder_error: Option<String>,
     import: Option<Import>,
+    started: bool,
 }
 
 impl App {
-    fn start(&self, ctx: &egui::Context) {
+    fn start(&mut self, ctx: &egui::Context) {
         let Some(paths) = self.paths.clone() else { return };
+        self.started = true;
         *self.state.lock().unwrap() = State { text: "Avvio…".into(), ..State::default() };
+        let screen = screen_size(ctx);
         let (state, ctx) = (self.state.clone(), ctx.clone());
         std::thread::spawn(move || {
             let report = |p: Progress| {
@@ -155,7 +169,7 @@ impl App {
                 s.fraction = p.fraction;
                 ctx.request_repaint();
             };
-            let result = prepare(&paths, &report).map_err(|e| format!("{e:#}"));
+            let result = prepare(&paths, screen, &report).map_err(|e| format!("{e:#}"));
             state.lock().unwrap().result = Some(result);
             ctx.request_repaint();
         });
@@ -295,6 +309,10 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Si parte dal primo fotogramma e non prima: serve la risoluzione del monitor.
+        if !self.started {
+            self.start(ctx);
+        }
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(12.0);
             ui.heading("Pinball AIO");
@@ -317,7 +335,7 @@ impl eframe::App for App {
 /// `--cli`: stesso lavoro senza finestra, con l'avanzamento sul terminale.
 /// `--no-launch` (solo con `--cli`): aggiorna e configura senza avviare VPinFE.
 fn run_cli(paths: &Paths, launch_after: bool) -> Result<()> {
-    let vpinfe = prepare(paths, &|p| eprintln!("{}", p.text))?;
+    let vpinfe = prepare(paths, FALLBACK_SCREEN, &|p| eprintln!("{}", p.text))?;
     if launch_after {
         if !has_tables(paths) {
             eprintln!("Nessun tavolo: importali dalla pagina {}", manager_url(paths).1);
@@ -345,7 +363,8 @@ fn main() {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([480.0, 220.0])
-            .with_resizable(false),
+            .with_resizable(false)
+            .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../assets/vpinball.png")).unwrap_or_default()),
         ..Default::default()
     };
     let app = App {
@@ -354,14 +373,12 @@ fn main() {
         folder: Paths::default_root().display().to_string(),
         folder_error: None,
         import: None,
+        started: false,
     };
     let result = eframe::run_native(
         "Pinball AIO",
         options,
-        Box::new(move |cc| {
-            app.start(&cc.egui_ctx);
-            Ok(Box::new(app))
-        }),
+        Box::new(move |_cc| Ok(Box::new(app))),
     );
     if let Err(e) = result {
         eprintln!("Errore: {e}");
