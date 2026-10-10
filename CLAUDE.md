@@ -1,79 +1,79 @@
-# Launcher Visual Pinball "installa e gioca"
+# Pinball AIO
 
-## Obiettivo
+Launcher per Windows e Linux che scarica, tiene aggiornati e avvia **VPinballX** (il motore) e **VPinFE** (la libreria dei tavoli), già configurati tra loro. Modello di riferimento: Pocket Pinball / l'app VPX per Android, cioè "installa e gioca".
 
-App desktop per Windows e Linux (AppImage) che permetta di giocare ai tavoli Visual Pinball X senza configurazione, sul modello dell'app VPX per Android: si importano i file (`.vpx`, `.directb2s`, ROM `.zip`), compaiono in una libreria con copertina, si clicca e si gioca.
-
-Non è un motore di flipper: è un involucro attorno a **VPinballX standalone**, che fa tutta la simulazione. L'app importa i file, li mette in ordine e lancia il motore.
-
-Il valore rispetto ai frontend esistenti è solo la semplicità: motore incluso, nessun percorso da impostare, import con un click. Ogni scelta va valutata su questo criterio; multi-schermo, cabinet e personalizzazione spinta sono fuori scopo.
-
-## Cosa deve fare
-
-1. Scaricare e aggiornare da sola VPinballX e VPinFE, così l'utente non installa altro.
-2. Import con pulsante o drag & drop di `.vpx`, `.directb2s` e ROM `.zip`.
-3. Creare da sola la struttura delle cartelle (vedi sotto).
-4. Abbinare automaticamente ogni ROM al suo tavolo.
-5. Applicare automaticamente le patch agli script dei tavoli che ne hanno bisogno.
-6. Mostrare una griglia di tavoli con copertina e lanciare il tavolo scelto.
+- Repository: https://github.com/Mr-Flower/pinball-aio (pubblico), ultima release `v0.1.1`.
+- Il valore del progetto è solo la semplicità: nessun percorso da impostare. Multi-schermo, cabinet e personalizzazione spinta sono fuori scopo.
 
 ## Decisioni prese (2026-10-10)
 
-- **Frontend: VPinFE**, non uno proprio. L'app è un piccolo launcher (`pinball-aio`) che scarica, aggiorna e avvia VPinballX e VPinFE già configurati. Condizione posta dall'utente: gli aggiornamenti dei due programmi li installa il launcher, in automatico a ogni avvio.
-- **Motore non incluso nei pacchetti:** il launcher scarica le release ufficiali da GitHub al primo avvio (serve internet). Così non si ridistribuiscono binari di terzi; il launcher deve restare gratuito (licenze "old MAME" non commerciali di VPinball e PinMAME).
-- **Una cartella per tavolo** (standard VPinball, richiesto da VPinFE), più una cartella `pinmame` condivisa accanto a `tables` per le ROM.
-- **Uso previsto:** un solo monitor in orizzontale, backglass e DMD incorporati nella finestra del tavolo.
+- **Frontend: VPinFE**, non uno proprio. Condizione dell'utente: gli aggiornamenti di VPinballX e VPinFE li installa il launcher, in automatico a ogni avvio.
+- **Niente binari di terzi nei pacchetti.** Il launcher scarica le release ufficiali da GitHub al primo avvio (serve internet). Deve restare gratuito: VPinball e PinMAME hanno parti sotto licenza "old MAME" non commerciale. ROM e tavoli non si includono né si scaricano mai.
+- **Una cartella per tavolo** (lo richiede VPinFE), più una cartella `pinmame` condivisa accanto a `tables`.
+- **Cartella dati scelta dall'utente al primo avvio**; tutto deve stare lì dentro, così cancellarla fa pulizia.
+- **Uso previsto:** un solo monitor in orizzontale, vista desktop, DMD dentro la finestra del tavolo.
+- **Icona:** la pallina di VPinballX, su richiesta dell'utente. Non è MIT: resta sotto la licenza di Visual Pinball (vedi `assets/README.md`).
+- **Commit senza coautori:** niente righe di attribuzione a Claude nei messaggi di commit.
 
-## Struttura delle cartelle
+## Come funziona
+
+A ogni avvio (`src/main.rs`, funzione `prepare`):
+
+1. `paths.rs`: trova la cartella dati. Ordine: variabile `PINBALL_AIO_DIR`, cartella `PinballData` accanto all'eseguibile, percorso salvato in `~/.config/pinball-aio/location.txt`. Se manca o è stata cancellata, la finestra la chiede.
+2. `update.rs`: per ciascuno dei due programmi legge le release su GitHub, e se il tag è diverso da quello in `engine/versions.json` scarica, verifica l'sha256, estrae e scambia le cartelle. La versione precedente resta in `engine/<nome>.old`. Senza rete parte con ciò che è installato.
+3. `config.rs`: crea `config/VPinballX.ini` solo se manca; riscrive sempre in `vpinfe.ini` i quattro percorsi `vpxbinpath`, `tablerootdir`, `vpxinipath`, `globalinioverride`.
+4. `library.rs`: sposta i `.vpx` sciolti in `tables/` in una cartella per tavolo (nome tagliato a "Titolo (Marca Anno)"), con i file dallo stesso nome. Se ci sono tavoli nuovi lancia `vpinfe --buildmeta` (schede `.info` e copertine) e `vpinfe --vpxpatch` (patch degli script).
+5. Avvia VPinFE. Se non c'è nessun tavolo lo avvia `--headless` e apre nel browser la sua pagina di gestione, con un pulsante per passare poi alla libreria.
+
+`pinball-aio --cli --no-launch` fa i passi 1-4 senza finestra: utile per provare.
+
+## Struttura della cartella dati
 
 ```
-<cartella scelta al primo avvio>/  <- ricordata in ~/.config/pinball-aio/location.txt; se cancellata viene richiesta
-  tables/<Tavolo (Marca Anno)>/ <- .vpx, .directb2s, .info, pupvideos/, pinmame/ (facoltativa)
-  pinmame/roms|nvram/           <- ROM condivise: PinMAMEPath in [Plugin.PinMAME]
-  config/VPinballX.ini          <- creato una volta sola, poi è dell'utente
-  config/vpinfe/vpinfe.ini      <- percorsi riscritti a ogni avvio
-  engine/vpinball|vpinfe/       <- più <nome>.old (versione precedente) e versions.json
+<cartella scelta>/            (sul PC dell'utente: ~/Pinball)
+  tables/<Tavolo (Marca Anno)>/   .vpx, .directb2s, .info, medias/, pupvideos/, pinmame/ (facoltativa)
+  pinmame/roms|nvram/             ROM condivise (zip non estratti)
+  config/VPinballX.ini            impostazioni del motore, dell'utente dopo la creazione
+  config/vpinfe/                  vpinfe.ini, temi, log di VPinFE
+  config/vpx-data/                log e dati del motore (solo Linux)
+  engine/vpinball|vpinfe/         più <nome>.old e versions.json
 ```
 
-Tutto deve stare in quella cartella, così cancellarla fa pulizia: su Linux anche i dati del motore (`vpxlaunchenv = XDG_DATA_HOME=…/config/vpx-data`); su Windows il motore scrive ancora in `%APPDATA%\VPinballX`. `PINBALL_AIO_DIR` e `PinballData` accanto all'eseguibile hanno la precedenza.
+## Fatti verificati
 
-Il motore usa `PinMAMEPath` solo se il tavolo non ha una sua `pinmame/roms`.
+**VPinballX 10.8.1** (release `v10.8.1-5436-af26b2d93`, build `VPinballX_BGFX`)
 
-## Stack
+- Le 10.8.1 sono pre-release: si guarda l'elenco delle release, non "latest". Asset: `…-linux-x64-Release.tar.gz` (con symlink) e `…-windows-x64-Release.zip` (esiste anche una variante `mingw`, da escludere).
+- PinMAME: usa `pinmame/roms` accanto al tavolo se esiste, altrimenti `PinMAMEPath` in `[Plugin.PinMAME]`. La ROM è cercata per nome.
+- Opzioni usate: `-ini <file>`, `-play <tavolo>`, `-PrefPath`, `-ExtractVBS`. Su Linux log e dati vanno in `$XDG_DATA_HOME/VPinballX/10.8/`.
+- Riquadri incorporati (`BackglassOutput` / `ScoreViewOutput = 2`): senza posizione e dimensioni esplicite occupano tutta la finestra. `…WndX/WndY/Width/Height` sono in pixel dell'immagine disegnata, cioè schermo × `AAFactor`.
+- Sincronizzazione: il predefinito `SyncMode = 3` (frame pacing) sul PC dell'utente dava 52 fps medi con cali a 25. `SyncMode = 1` (vsync) tiene la frequenza del monitor. `MaxFramerate` viene ignorato con il vsync acceso; vale con `SyncMode = 0`.
+- Tasti predefiniti: F12 apre il menu interno (si naviga con Ctrl sinistro/destro e Shift sinistro/destro), ESC esce dal tavolo, F11 mostra gli fps, Shift = flipper, Invio = lancio, 1 = start, 5 = moneta.
+- Vista per tavolo: file `.ini` con lo stesso nome del `.vpx`, sezione `[TableOverride]`, voci `ViewDT…`. Il menu F12 lo crea da solo quando si salva "per questo tavolo".
+- Alcuni tavoli disegnano un proprio DMD nella vista desktop (Metallica: verde, in alto a sinistra), altri no (Addams Family). Il riquadro ScoreView è in più e non lo sostituisce.
 
-Rust + eframe (egui) per la finestra di avanzamento; niente Tauri né web. AppImage con `packaging/build-appimage.sh`, exe Windows da `cargo build`; `.github/workflows/release.yml` pubblica entrambi a ogni tag `v*`. `--cli --no-launch` per provare senza finestra.
+**VPinFE 2.6.6**
 
-## Parti del lavoro e difficoltà
+- Pacchetto completo `vpinfe-<tag>-linux-x64.zip` / `-win-x64.zip` (con Chromium); su Windows si avvia da `vpinfe.bat`.
+- Vede solo cartelle con un `.vpx` e un `.info`. I tavoli non riconosciuti dal nome vanno abbinati a mano in "Unmatched Tables".
+- `--configdir DIR`, `--headless`, `--buildmeta`, `--vpxpatch`, `--gamepadtest`. Pagina di gestione su `http://localhost:8001`.
+- `globalinioverride` è il file passato al motore con `-ini`; `vpxlaunchenv` imposta variabili d'ambiente per il motore (usato per `XDG_DATA_HOME`).
+- Con SIGTERM chiude anche il processo figlio; con un kill secco il figlio resta vivo e tiene occupate le porte.
 
-| Parte | Difficoltà | Note |
-|---|---|---|
-| Interfaccia libreria + avvio tavolo | Facile | Lista, immagini, avvio di un processo |
-| Import e organizzazione dei file | Facile | Copia e rinomina |
-| Abbinare ROM al tavolo | Media | Leggere il nome ROM dallo script dentro il `.vpx` (`cGameName`) |
-| Patch automatiche degli script | Media | Esiste un repository pubblico di patch per standalone; è quello che fa VPinFE |
-| Copertine e metadati | Media | Serve una fonte online oppure uno screenshot generato |
-| Pacchetti AppImage + exe | Media | Il grosso è impacchettare il motore con le sue librerie |
-| Tavoli "difficili" (PUP pack, FlexDMD, script particolari) | Difficile | Alcuni non partiranno mai al primo colpo; accettarlo e segnalarlo bene all'utente |
+**Build e pubblicazione**
 
-## Primo passo
+- Rust + eframe (egui) per la finestra, `rfd` per il selettore di cartelle; niente Tauri né web.
+- `packaging/build-appimage.sh [cartella]` crea l'AppImage. Fallisce con "Text file busy" se l'AppImage di destinazione è in esecuzione.
+- `.github/workflows/release.yml`: un tag `v*` costruisce AppImage ed exe e crea la release; avviato a mano costruisce soltanto.
+- I test girano anche su Windows: nei confronti non scrivere percorsi con `/` fissi.
 
-Prototipo **solo Linux** con i tavoli reali dell'utente: import, struttura cartelle, avvio. Misurare quanti tavoli partono senza interventi manuali: quel numero dice se l'idea regge. Windows e la rifinitura vengono dopo.
+## Punti aperti
 
-## Fatti utili
-
-- **Motore:** VPinballX, https://github.com/vpinball/vpinball/releases
-  - 10.8.0 è l'ultima stabile; su Windows si installa con `VPX8setup.exe` e usa VPinMAME esterno con le ROM in una cartella globale.
-  - 10.8.1 è in pre-release, ha build Linux x64 (`VPinballX_BGFX`) e PinMAME integrato. È la base per questo progetto.
-  - Esempio di avvio preso da un installer Lutris: `VPinballX_BGFX -EnableTrueFullscreen` con un `config.ini` e il percorso del `.vpx`. Le opzioni esatte vanno verificate con l'help del binario.
-- **Perché servono le patch:** su Linux il VBScript di Windows è sostituito da un'implementazione Wine, e molti tavoli non partono senza uno script `.vbs` corretto.
-- **VPinFE** (https://github.com/superhac/vpinfe): frontend esistente per Linux/Mac/Windows che fa già gran parte di questo (libreria, artwork, patch automatiche), ma richiede di impostare percorsi, abbinare i tavoli a file `.info` e mappare il gamepad. Utile come riferimento per patch, metadati e struttura cartelle.
-- **vpxtool** (https://lib.rs/crates/vpxtool): utility Rust a riga di comando che indicizza e apre i file VPX; da qui si ricava come estrarre lo script da un tavolo.
-- **Ambiente di sviluppo:** CachyOS (Arch). Per provare il motore senza impacchettarlo: pacchetto AUR `vpinball`.
-
-## Da verificare
-
-- Licenze di VPinball e PinMAME per la ridistribuzione dei binari dentro l'app. Le ROM non vanno mai incluse.
-- Percorso ROM globale alternativo su Linux (forse `~/.pinmame/roms/`).
-- Se la build Windows 10.8.1 funziona con lo stesso layout a cartelle e PinMAME integrato, senza registrare componenti COM.
-- Nome e posizione del repository delle patch per standalone e come VPinFE sceglie la patch giusta per un tavolo.
-- Fonte per copertine e metadati dei tavoli.
+- **Windows mai provato dal vivo:** l'exe compila e passa i test su GitHub, ma nessuno l'ha avviato. Lì il motore scrive ancora impostazioni e log in `%APPDATA%\VPinballX`, fuori dalla cartella dati.
+- **Installazione da zero mai provata con la v0.1.1:** i default grafici sono coperti solo da un test automatico; il percorso "nessun tavolo → pagina di gestione" non è stato visto funzionare dall'inizio alla fine.
+- **DMD doppio:** sui tavoli con un DMD proprio, quello ScoreView è un duplicato. Spostando l'arancione, quello verde di Metallica risulta tagliato: causa non trovata (sospettato il riquadro del backglass a tutta finestra, `BackglassOutput = 0` per escluderlo).
+- **Sfondo di Metallica:** l'utente ricorda uno sfondo dietro il tavolo che poi è sparito; con le impostazioni originali non ricompare e non si è capito da dove venisse.
+- **Default grafici tarati su un solo PC**, con grafica integrata (Radeon 680M, 2560×1440). Il DMD in alto a sinistra copre il DMD proprio di Metallica, ma altri tavoli possono averlo altrove.
+- **PUP pack, FlexDMD, backglass:** non provati (l'utente non ha ancora file di questo tipo).
+- **VPinFE che si aggiorna da solo** dalla sua pagina: il launcher non se ne accorge e riscarica la stessa versione una volta.
+- Attesa durante `--buildmeta` senza percentuale (circa 15 secondi a tavolo per le copertine).
