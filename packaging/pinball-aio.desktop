@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Pinball AIO
+Comment=Scarica, aggiorna e avvia VPinballX e VPinFE
+Exec=pinball-aio
+Icon=pinball-aio
+Categories=Game;
+Terminal=false

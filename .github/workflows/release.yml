@@ -1,0 +1,51 @@
+name: release
+
+# Un tag "v*" costruisce l'AppImage e l'exe e li pubblica in una release.
+# Avviato a mano costruisce soltanto, lasciando i file come artifact.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    # La versione più vecchia disponibile, così l'AppImage gira anche su distro non recenti.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - run: packaging/build-appimage.sh .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: PinballAIO-x86_64.AppImage
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - run: Copy-Item target/release/pinball-aio.exe PinballAIO-x64.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: PinballAIO-x64.exe
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - run: gh release create "$GITHUB_REF_NAME" PinballAIO-x86_64.AppImage PinballAIO-x64.exe --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
