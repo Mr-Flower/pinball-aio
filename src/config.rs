@@ -19,7 +19,7 @@ use std::path::Path;
 /// Le misure del DMD sono in pixel dell'immagine disegnata (schermo × `AAFactor`): chi
 /// cambia `AAFactor` deve riscalarle.
 /// Il file viene creato una volta sola: dopo, le modifiche dell'utente restano.
-fn default_vpx_ini(paths: &Paths, (width, _height): (u32, u32)) -> String {
+fn default_vpx_ini(paths: &Paths, (width, _height): (u32, u32), embedded: u32) -> String {
     let dmd_width = width * 11 / 32;
     format!(
         "[Player]\n\
@@ -32,10 +32,10 @@ fn default_vpx_ini(paths: &Paths, (width, _height): (u32, u32)) -> String {
          PFReflection = 2\n\
          \n\
          [Backglass]\n\
-         BackglassOutput = 2\n\
+         BackglassOutput = {embedded}\n\
          \n\
          [ScoreView]\n\
-         ScoreViewOutput = 2\n\
+         ScoreViewOutput = {embedded}\n\
          ScoreViewWndX = 0\n\
          ScoreViewWndY = 0\n\
          ScoreViewWidth = {dmd_width}\n\
@@ -56,7 +56,9 @@ mod tests {
     #[test]
     fn default_ini_scales_the_dmd_with_the_screen() {
         let paths = Paths { root: PathBuf::from("/data") };
-        let ini = default_vpx_ini(&paths, (2560, 1440));
+        let ini = default_vpx_ini(&paths, (2560, 1440), embedded_output("v10.8.1-5436-af26b2d93"));
+        assert_eq!(ini::get(&ini, "ScoreView", "ScoreViewOutput").as_deref(), Some("2"));
+        assert_eq!(ini::get(&ini, "Backglass", "BackglassOutput").as_deref(), Some("2"));
         assert_eq!(ini::get(&ini, "ScoreView", "ScoreViewWidth").as_deref(), Some("880"));
         assert_eq!(ini::get(&ini, "ScoreView", "ScoreViewHeight").as_deref(), Some("220"));
         assert_eq!(ini::get(&ini, "Player", "SyncMode").as_deref(), Some("1"));
@@ -64,15 +66,62 @@ mod tests {
         assert_eq!(ini::get(&ini, "Player", "ForceBloomOff").as_deref(), Some("1"));
         let pinmame = paths.pinmame().display().to_string();
         assert_eq!(ini::get(&ini, "Plugin.PinMAME", "PinMAMEPath"), Some(pinmame));
-        let small = default_vpx_ini(&paths, (1920, 1080));
+        let small = default_vpx_ini(&paths, (1920, 1080), embedded_output("v10.8.1-3788-2151290"));
+        assert_eq!(ini::get(&small, "ScoreView", "ScoreViewOutput").as_deref(), Some("1"));
         assert_eq!(ini::get(&small, "ScoreView", "ScoreViewWidth").as_deref(), Some("660"));
+    }
+
+    #[test]
+    fn outputs_follow_the_engine_across_the_renumbering() {
+        let ini = "[Backglass]\nBackglassOutput = 2\n\n[ScoreView]\nScoreViewOutput = 2\nScoreViewWidth = 848\n";
+        let old = swap_outputs(ini);
+        assert_eq!(ini::get(&old, "Backglass", "BackglassOutput").as_deref(), Some("1"));
+        assert_eq!(ini::get(&old, "ScoreView", "ScoreViewOutput").as_deref(), Some("1"));
+        assert_eq!(ini::get(&old, "ScoreView", "ScoreViewWidth").as_deref(), Some("848"));
+        assert_eq!(swap_outputs(&old), ini);
+        let off = "[ScoreView]\nScoreViewOutput = 0\n";
+        assert_eq!(swap_outputs(off), off);
     }
 }
 
-/// `screen` è la risoluzione del monitor in pixel, usata solo per creare `VPinballX.ini`.
-pub fn write(paths: &Paths, vpx_exe: &Path, screen: (u32, u32)) -> io::Result<()> {
+/// Valore di `BackglassOutput` / `ScoreViewOutput` che vuol dire "dentro la finestra del
+/// tavolo". Fino alla build 3788 era 1 e 2 apriva una finestra a parte; nelle build
+/// successive i due numeri sono scambiati.
+pub fn embedded_output(vpx_tag: &str) -> u32 {
+    let build = vpx_tag.split('-').nth(1).and_then(|n| n.parse::<u32>().ok());
+    if build.is_some_and(|n| n <= 3788) { 1 } else { 2 }
+}
+
+fn swap_outputs(text: &str) -> String {
+    let mut text = text.to_string();
+    for (section, key) in [("Backglass", "BackglassOutput"), ("ScoreView", "ScoreViewOutput")] {
+        let swapped = match ini::get(&text, section, key).as_deref() {
+            Some("1") => "2",
+            Some("2") => "1",
+            _ => continue,
+        };
+        text = ini::set(&text, section, key, swapped);
+    }
+    text
+}
+
+/// Quando il motore passa da una numerazione all'altra, scambia 1 e 2 nelle due voci di
+/// `VPinballX.ini`, così backglass e DMD restano dove l'utente li aveva.
+pub fn follow_engine(paths: &Paths, old_tag: &str, new_tag: &str) -> io::Result<()> {
+    if embedded_output(old_tag) == embedded_output(new_tag) {
+        return Ok(());
+    }
+    match fs::read_to_string(paths.vpx_ini()) {
+        Ok(text) => fs::write(paths.vpx_ini(), swap_outputs(&text)),
+        Err(_) => Ok(()),
+    }
+}
+
+/// `screen` è la risoluzione del monitor in pixel e `vpx_tag` la versione del motore
+/// installata: servono solo per creare `VPinballX.ini`.
+pub fn write(paths: &Paths, vpx_exe: &Path, vpx_tag: &str, screen: (u32, u32)) -> io::Result<()> {
     if !paths.vpx_ini().exists() {
-        fs::write(paths.vpx_ini(), default_vpx_ini(paths, screen))?;
+        fs::write(paths.vpx_ini(), default_vpx_ini(paths, screen, embedded_output(vpx_tag)))?;
     }
 
     // I percorsi vengono riscritti a ogni avvio: restano giusti anche se la cartella

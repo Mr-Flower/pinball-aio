@@ -17,16 +17,22 @@ pub struct Component {
     pub id: &'static str,
     pub name: &'static str,
     pub repo: &'static str,
+    /// Se c'è, si installa sempre e solo questa release invece della più recente.
+    pin: Option<&'static str>,
     is_asset: fn(&str) -> bool,
     is_exe: fn(&str) -> bool,
 }
 
 // VPinballX: le build 10.8.1 sono pre-release, quindi si guarda l'elenco completo
 // delle release e non solo "latest". "-windows-x64-" esclude la variante mingw.
+// La versione è ferma su una build provata e si cambia qui a mano: le pre-release nuove
+// possono rompere i tavoli. La 5436 non passa ai tavoli i solenoidi oltre il 32 delle
+// Stern SAM (in Metallica la bocca del serpente resta chiusa); con la 3788 funzionano.
 pub const VPINBALL: Component = Component {
     id: "vpinball",
     name: "VPinballX",
     repo: "vpinball/vpinball",
+    pin: Some("v10.8.1-5436-af26b2d93"),
     #[cfg(target_os = "linux")]
     is_asset: |n| n.starts_with("VPinballX_BGFX-") && n.contains("-linux-x64-Release."),
     #[cfg(windows)]
@@ -42,6 +48,7 @@ pub const VPINFE: Component = Component {
     id: "vpinfe",
     name: "VPinFE",
     repo: "superhac/vpinfe",
+    pin: None,
     #[cfg(target_os = "linux")]
     is_asset: |n| n.starts_with("vpinfe-") && n.ends_with("-linux-x64.zip"),
     #[cfg(windows)]
@@ -88,13 +95,27 @@ fn agent() -> ureq::Agent {
         .build()
 }
 
-fn latest_asset(component: &Component) -> Result<(String, Asset)> {
-    let url = format!("https://api.github.com/repos/{}/releases?per_page=15", component.repo);
-    let releases: Vec<Release> = match agent().get(&url).set("Accept", "application/vnd.github+json").call() {
-        Ok(response) => response.into_json().context("risposta di GitHub non valida")?,
+fn github<T: serde::de::DeserializeOwned>(url: &str) -> Result<T> {
+    match agent().get(url).set("Accept", "application/vnd.github+json").call() {
+        Ok(response) => response.into_json().context("risposta di GitHub non valida"),
         Err(ureq::Error::Status(403 | 429, _)) => bail!("GitHub ha limitato le richieste, riprova tra un'ora"),
-        Err(e) => return Err(anyhow!(e).context("impossibile contattare GitHub")),
+        Err(e) => Err(anyhow!(e).context("impossibile contattare GitHub")),
+    }
+}
+
+/// La release da installare: quella fissata dal componente, altrimenti la più recente.
+fn wanted_asset(component: &Component) -> Result<(String, Asset)> {
+    let api = format!("https://api.github.com/repos/{}/releases", component.repo);
+    let releases = match component.pin {
+        Some(tag) => vec![github::<Release>(&format!("{api}/tags/{tag}"))?],
+        None => github(&format!("{api}?per_page=15"))?,
     };
+    pick(releases, component)
+        .ok_or_else(|| anyhow!("nessuna build di {} trovata per questo sistema", component.name))
+}
+
+/// La release più recente (GitHub le elenca dalla più nuova) con un pacchetto per questo sistema.
+fn pick(releases: Vec<Release>, component: &Component) -> Option<(String, Asset)> {
     releases
         .into_iter()
         .filter(|r| !r.draft)
@@ -102,7 +123,6 @@ fn latest_asset(component: &Component) -> Result<(String, Asset)> {
             let asset = r.assets.into_iter().find(|a| (component.is_asset)(&a.name))?;
             Some((r.tag_name, asset))
         })
-        .ok_or_else(|| anyhow!("nessuna build di {} trovata per questo sistema", component.name))
 }
 
 fn read_versions(paths: &Paths) -> BTreeMap<String, String> {
@@ -185,6 +205,14 @@ fn extract(archive: &Path, dest: &Path) -> Result<()> {
     let file = File::open(archive)?;
     if archive.extension().is_some_and(|e| e == "zip") {
         zip::ZipArchive::new(file)?.extract(dest)?;
+        // Le build Linux di VPinballX meno recenti sono un .tar.gz chiuso dentro lo zip.
+        for entry in fs::read_dir(dest)?.flatten() {
+            let inner = entry.path();
+            if inner.is_file() && entry.file_name().to_str().is_some_and(|n| n.ends_with(".tar.gz")) {
+                tar::Archive::new(flate2::read::GzDecoder::new(File::open(&inner)?)).unpack(dest)?;
+                fs::remove_file(&inner)?;
+            }
+        }
     } else {
         tar::Archive::new(flate2::read::GzDecoder::new(file)).unpack(dest)?;
     }
@@ -198,7 +226,7 @@ fn recover(current: &Path, previous: &Path) {
     }
 }
 
-/// Controlla l'ultima release e, se è diversa da quella installata, la scarica e la installa.
+/// Controlla la release voluta e, se è diversa da quella installata, la scarica e la installa.
 /// La versione precedente resta in `<id>.old` per poter tornare indietro a mano.
 pub fn update(paths: &Paths, component: &Component, report: &dyn Fn(Progress)) -> Result<Outcome> {
     let name = component.name;
@@ -208,7 +236,7 @@ pub fn update(paths: &Paths, component: &Component, report: &dyn Fn(Progress)) -
     recover(&current, &previous);
 
     report(Progress { text: format!("Controllo aggiornamenti di {name}…"), fraction: None });
-    let (tag, asset) = latest_asset(component)?;
+    let (tag, asset) = wanted_asset(component)?;
     if installed_version(paths, component).as_deref() == Some(&tag) && exe_path(paths, component).is_some() {
         return Ok(Outcome::UpToDate(tag));
     }
@@ -237,4 +265,35 @@ pub fn update(paths: &Paths, component: &Component, report: &dyn Fn(Progress)) -
     fs::write(paths.versions_file(), serde_json::to_vec_pretty(&versions)?)?;
     let _ = fs::remove_dir_all(paths.downloads());
     Ok(Outcome::Updated(tag))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn release(tag: &str, draft: bool, asset: &str) -> Release {
+        let asset = Asset { name: asset.to_string(), browser_download_url: String::new(), size: 0, digest: None };
+        Release { tag_name: tag.to_string(), draft, assets: vec![asset] }
+    }
+
+    #[test]
+    fn picks_the_newest_release_with_a_package_for_this_system() {
+        #[cfg(target_os = "linux")]
+        let package = "vpinfe-v2.6.6-linux-x64.zip";
+        #[cfg(windows)]
+        let package = "vpinfe-v2.6.6-win-x64.zip";
+        let releases = vec![
+            release("v2.7.0", true, package),
+            release("v2.6.7", false, "vpinfe-v2.6.7-macos-arm64.zip"),
+            release("v2.6.6", false, package),
+            release("v2.6.5", false, package),
+        ];
+        assert_eq!(pick(releases, &VPINFE).unwrap().0, "v2.6.6");
+    }
+
+    #[test]
+    fn the_engine_is_pinned_and_the_frontend_is_not() {
+        assert!(VPINBALL.pin.is_some());
+        assert!(VPINFE.pin.is_none());
+    }
 }

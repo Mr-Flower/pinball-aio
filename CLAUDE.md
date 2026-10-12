@@ -2,12 +2,13 @@
 
 Launcher per Windows e Linux che scarica, tiene aggiornati e avvia **VPinballX** (il motore) e **VPinFE** (la libreria dei tavoli), già configurati tra loro. Modello di riferimento: Pocket Pinball / l'app VPX per Android, cioè "installa e gioca".
 
-- Repository: https://github.com/Mr-Flower/pinball-aio (pubblico), ultima release `v0.1.1`.
+- Repository: https://github.com/Mr-Flower/pinball-aio (pubblico), ultima release `v0.1.2`.
 - Il valore del progetto è solo la semplicità: nessun percorso da impostare. Multi-schermo, cabinet e personalizzazione spinta sono fuori scopo.
 
 ## Decisioni prese (2026-10-10)
 
-- **Frontend: VPinFE**, non uno proprio. Condizione dell'utente: gli aggiornamenti di VPinballX e VPinFE li installa il launcher, in automatico a ogni avvio.
+- **Frontend: VPinFE**, non uno proprio. Condizione dell'utente: gli aggiornamenti li installa il launcher, in automatico a ogni avvio.
+- **VPinballX fermo su una build provata** (deciso dopo, stesso giorno): solo VPinFE segue l'ultima release. La build del motore è `pin` in `src/update.rs` (ora `v10.8.1-5436-af26b2d93`) e si cambia a mano dopo averla provata, con una nuova versione del launcher.
 - **Niente binari di terzi nei pacchetti.** Il launcher scarica le release ufficiali da GitHub al primo avvio (serve internet). Deve restare gratuito: VPinball e PinMAME hanno parti sotto licenza "old MAME" non commerciale. ROM e tavoli non si includono né si scaricano mai.
 - **Una cartella per tavolo** (lo richiede VPinFE), più una cartella `pinmame` condivisa accanto a `tables`.
 - **Cartella dati scelta dall'utente al primo avvio**; tutto deve stare lì dentro, così cancellarla fa pulizia.
@@ -20,8 +21,8 @@ Launcher per Windows e Linux che scarica, tiene aggiornati e avvia **VPinballX**
 A ogni avvio (`src/main.rs`, funzione `prepare`):
 
 1. `paths.rs`: trova la cartella dati. Ordine: variabile `PINBALL_AIO_DIR`, cartella `PinballData` accanto all'eseguibile, percorso salvato in `~/.config/pinball-aio/location.txt`. Se manca o è stata cancellata, la finestra la chiede.
-2. `update.rs`: per ciascuno dei due programmi legge le release su GitHub, e se il tag è diverso da quello in `engine/versions.json` scarica, verifica l'sha256, estrae e scambia le cartelle. La versione precedente resta in `engine/<nome>.old`. Senza rete parte con ciò che è installato.
-3. `config.rs`: crea `config/VPinballX.ini` solo se manca; riscrive sempre in `vpinfe.ini` i quattro percorsi `vpxbinpath`, `tablerootdir`, `vpxinipath`, `globalinioverride`.
+2. `update.rs`: per ciascuno dei due programmi legge da GitHub la release voluta (quella fissata per VPinballX, l'ultima per VPinFE), e se il tag è diverso da quello in `engine/versions.json` scarica, verifica l'sha256, estrae e scambia le cartelle. La versione precedente resta in `engine/<nome>.old`. Senza rete parte con ciò che è installato.
+3. `config.rs`: crea `config/VPinballX.ini` solo se manca; riscrive sempre in `vpinfe.ini` i quattro percorsi `vpxbinpath`, `tablerootdir`, `vpxinipath`, `globalinioverride`. Se il motore cambia tra build con numerazione diversa di `BackglassOutput` / `ScoreViewOutput`, scambia 1 e 2 in `VPinballX.ini`.
 4. `library.rs`: sposta i `.vpx` sciolti in `tables/` in una cartella per tavolo (nome tagliato a "Titolo (Marca Anno)"), con i file dallo stesso nome. Se ci sono tavoli nuovi lancia `vpinfe --buildmeta` (schede `.info` e copertine) e `vpinfe --vpxpatch` (patch degli script).
 5. Avvia VPinFE. Se non c'è nessun tavolo lo avvia `--headless` e apre nel browser la sua pagina di gestione, con un pulsante per passare poi alla libreria.
 
@@ -41,9 +42,13 @@ A ogni avvio (`src/main.rs`, funzione `prepare`):
 
 ## Fatti verificati
 
-**VPinballX 10.8.1** (release `v10.8.1-5436-af26b2d93`, build `VPinballX_BGFX`)
+**VPinballX 10.8.1** (build `VPinballX_BGFX`; i fatti sotto sono stati verificati sulla `v10.8.1-5436-af26b2d93`, tranne dove è indicata la 3788)
 
-- Le 10.8.1 sono pre-release: si guarda l'elenco delle release, non "latest". Asset: `…-linux-x64-Release.tar.gz` (con symlink) e `…-windows-x64-Release.zip` (esiste anche una variante `mingw`, da escludere).
+- Le 10.8.1 sono pre-release, non compaiono come "latest". Asset: `…-linux-x64-Release.tar.gz` (con symlink) e `…-windows-x64-Release.zip` (esiste anche una variante `mingw`, da escludere). Nella 3788 l'asset Linux è un `.zip` con dentro il `.tar.gz`.
+- **Difetto della 5436:** i solenoidi oltre il 32 delle Stern SAM (51–58, scheda ausiliaria) non arrivano allo script del tavolo, né con `SolCallback` né leggendo `Controller.Solenoid`. In Metallica la bocca del serpente non si apre mai; fermi anche martello, bara, bersagli in fila, paletto. Succede ai tavoli che non accendono i solenoidi modulati (Metallica dichiara `UseVPMModSol = 1` ma non chiama `vpmInit`): con `.SolMask(2) = 1` prima di `.Run`, in uno script `.vbs` accanto al tavolo, i solenoidi arrivano. Con la 3788 funzionano senza modifiche. Non segnalato a monte. Il passaggio dei solenoidi è stato riscritto a luglio 2026 (build 5359) e dopo la 5436 ci sono altre correzioni non ancora rilasciate.
+- `BackglassOutput` / `ScoreViewOutput`: nella 5436 "dentro la finestra del tavolo" è 2; nella 3788 è 1, e 2 apre una finestra a parte grande quanto lo schermo.
+- La 3788 scrive il log sull'uscita standard, non in `vpinball.log`. Provata e scartata sul PC dell'utente: glitch grafici sul tavolo, DMD incorporato sbiadito e in basso a sinistra con le stesse coordinate, e alla chiusura riempie `VPinballX.ini` dei suoi valori predefiniti.
+- Per provare uno script modificato: una copia vera del `.vpx` con accanto un `.vbs` dallo stesso nome (un collegamento simbolico viene risolto e lo script ignorato). `debug.print` finisce nel log come `Script.Print`.
 - PinMAME: usa `pinmame/roms` accanto al tavolo se esiste, altrimenti `PinMAMEPath` in `[Plugin.PinMAME]`. La ROM è cercata per nome.
 - Opzioni usate: `-ini <file>`, `-play <tavolo>`, `-PrefPath`, `-ExtractVBS`. Su Linux log e dati vanno in `$XDG_DATA_HOME/VPinballX/10.8/`.
 - Riquadri incorporati (`BackglassOutput` / `ScoreViewOutput = 2`): senza posizione e dimensioni esplicite occupano tutta la finestra. `…WndX/WndY/Width/Height` sono in pixel dell'immagine disegnata, cioè schermo × `AAFactor`.
@@ -69,6 +74,8 @@ A ogni avvio (`src/main.rs`, funzione `prepare`):
 
 ## Punti aperti
 
+- **Motore fermo sulla 5436:** quando esce una release successiva va provata prima di spostare `pin` (Metallica senza lo script accanto: tiro al serpente). Altri tavoli Stern SAM con meccanismi sui solenoidi 51–58 possono avere lo stesso difetto; il launcher non li corregge.
+- **Lancio della pallina diverso da Pocket Pinball** su Metallica (arriva in un altro punto): non indagato.
 - **Windows mai provato dal vivo:** l'exe compila e passa i test su GitHub, ma nessuno l'ha avviato. Lì il motore scrive ancora impostazioni e log in `%APPDATA%\VPinballX`, fuori dalla cartella dati.
 - **Installazione da zero mai provata con la v0.1.1:** i default grafici sono coperti solo da un test automatico; il percorso "nessun tavolo → pagina di gestione" non è stato visto funzionare dall'inizio alla fine.
 - **DMD doppio:** sui tavoli con un DMD proprio, quello ScoreView è un duplicato. Spostando l'arancione, quello verde di Metallica risulta tagliato: causa non trovata (sospettato il riquadro del backglass a tutta finestra, `BackglassOutput = 0` per escluderlo).

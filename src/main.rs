@@ -21,6 +21,7 @@ use update::{Outcome, Progress, VPINBALL, VPINFE};
 /// Se un controllo fallisce ma il programma è già installato si prosegue con quello che c'è.
 fn prepare(paths: &Paths, screen: (u32, u32), report: &dyn Fn(Progress)) -> Result<PathBuf> {
     paths.create_all().with_context(|| format!("impossibile creare {}", paths.root.display()))?;
+    let vpx_before = update::installed_version(paths, &VPINBALL);
     for component in [&VPINBALL, &VPINFE] {
         match update::update(paths, component, report) {
             Ok(Outcome::UpToDate(tag)) => eprintln!("{} {tag}: già aggiornato", component.name),
@@ -32,7 +33,11 @@ fn prepare(paths: &Paths, screen: (u32, u32), report: &dyn Fn(Progress)) -> Resu
         }
     }
     let vpx = update::exe_path(paths, &VPINBALL).ok_or_else(|| anyhow!("VPinballX non trovato"))?;
-    config::write(paths, &vpx, screen).context("impossibile scrivere la configurazione")?;
+    let vpx_tag = update::installed_version(paths, &VPINBALL).unwrap_or_default();
+    if let Some(before) = vpx_before.filter(|before| *before != vpx_tag) {
+        config::follow_engine(paths, &before, &vpx_tag).context("impossibile aggiornare VPinballX.ini")?;
+    }
+    config::write(paths, &vpx, &vpx_tag, screen).context("impossibile scrivere la configurazione")?;
     let vpinfe = update::exe_path(paths, &VPINFE).ok_or_else(|| anyhow!("VPinFE non trovato"))?;
     prepare_tables(paths, &vpinfe, report);
     Ok(vpinfe)
