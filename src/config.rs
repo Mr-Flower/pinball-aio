@@ -81,11 +81,37 @@ pub fn follow_engine(paths: &Paths, old_tag: &str, new_tag: &str) -> io::Result<
     }
 }
 
+/// Plugin che il motore accende da solo su Linux ("standalone") e lascia spenti su Windows,
+/// dove si aspetta VPinMAME, B2S e gli altri installati a parte come oggetti COM: senza,
+/// lo script del tavolo si ferma con "Necessario oggetto: 'Controller'".
+const STANDALONE_PLUGINS: [&str; 9] =
+    ["AltSound", "B2SLegacy", "FlexDMD", "PinMAME", "PUP", "ScoreView", "Serum", "WMP", "VNI"];
+
+/// Accende i plugin di `STANDALONE_PLUGINS` che non hanno un valore: uno spento a mano
+/// dall'utente (`Enable = 0`) resta spento.
+fn enable_plugins(text: &str) -> String {
+    let mut text = text.to_string();
+    for plugin in STANDALONE_PLUGINS {
+        let section = format!("Plugin.{plugin}");
+        if ini::get(&text, &section, "Enable").unwrap_or_default().is_empty() {
+            text = ini::set(&text, &section, "Enable", "1");
+        }
+    }
+    text
+}
+
 /// `screen` è la risoluzione del monitor in pixel e `vpx_tag` la versione del motore
 /// installata: servono solo per creare `VPinballX.ini`.
 pub fn write(paths: &Paths, vpx_exe: &Path, vpx_tag: &str, screen: (u32, u32)) -> io::Result<()> {
     if !paths.vpx_ini().exists() {
         fs::write(paths.vpx_ini(), default_vpx_ini(paths, screen, embedded_output(vpx_tag)))?;
+    }
+    if cfg!(windows) {
+        let text = fs::read_to_string(paths.vpx_ini())?;
+        let enabled = enable_plugins(&text);
+        if enabled != text {
+            fs::write(paths.vpx_ini(), enabled)?;
+        }
     }
 
     // I percorsi vengono riscritti a ogni avvio: restano giusti anche se la cartella
@@ -134,6 +160,17 @@ mod tests {
         let small = default_vpx_ini(&paths, (1920, 1080), embedded_output("v10.8.1-3788-2151290"));
         assert_eq!(ini::get(&small, "ScoreView", "ScoreViewOutput").as_deref(), Some("1"));
         assert_eq!(ini::get(&small, "ScoreView", "ScoreViewWidth").as_deref(), Some("660"));
+    }
+
+    #[test]
+    fn plugins_without_a_value_are_enabled() {
+        let ini = "[Plugin.PinMAME]\nPinMAMEPath = x\nEnable = \n\n[Plugin.PUP]\nEnable = 0\n";
+        let enabled = enable_plugins(ini);
+        assert_eq!(ini::get(&enabled, "Plugin.PinMAME", "Enable").as_deref(), Some("1"));
+        assert_eq!(ini::get(&enabled, "Plugin.PinMAME", "PinMAMEPath").as_deref(), Some("x"));
+        assert_eq!(ini::get(&enabled, "Plugin.PUP", "Enable").as_deref(), Some("0"));
+        assert_eq!(ini::get(&enabled, "Plugin.ScoreView", "Enable").as_deref(), Some("1"));
+        assert_eq!(enable_plugins(&enabled), enabled);
     }
 
     #[test]

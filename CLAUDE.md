@@ -2,7 +2,7 @@
 
 Launcher per Windows e Linux che scarica, tiene aggiornati e avvia **VPinballX** (il motore) e **VPinFE** (la libreria dei tavoli), già configurati tra loro. Modello di riferimento: Pocket Pinball / l'app VPX per Android, cioè "installa e gioca".
 
-- Repository: https://github.com/Mr-Flower/pinball-aio (pubblico), ultima release `v0.1.3`.
+- Repository: https://github.com/Mr-Flower/pinball-aio (pubblico), ultima release `v0.1.4`.
 - Il valore del progetto è solo la semplicità: nessun percorso da impostare. Multi-schermo, cabinet e personalizzazione spinta sono fuori scopo.
 
 ## Decisioni prese (2026-10-10)
@@ -51,6 +51,7 @@ A ogni avvio (`src/main.rs`, funzione `prepare`):
 - La 3788 scrive il log sull'uscita standard, non in `vpinball.log`. Provata e scartata sul PC dell'utente: glitch grafici sul tavolo, DMD incorporato sbiadito e in basso a sinistra con le stesse coordinate, e alla chiusura riempie `VPinballX.ini` dei suoi valori predefiniti.
 - Per provare uno script modificato: una copia vera del `.vpx` con accanto un `.vbs` dallo stesso nome (un collegamento simbolico viene risolto e lo script ignorato). `debug.print` finisce nel log come `Script.Print`.
 - PinMAME: usa `pinmame/roms` accanto al tavolo se esiste, altrimenti `PinMAMEPath` in `[Plugin.PinMAME]`. La ROM è cercata per nome.
+- Plugin: su Linux ("standalone") PinMAME, ScoreView, FlexDMD, B2SLegacy, PUP, AltSound, Serum, WMP e VNI sono accesi se `Enable` manca; su Windows sono spenti e lo script si ferma con "Necessario oggetto: 'Controller'" (letto in `Settings_properties.inl`, non provato dal vivo). Il launcher su Windows scrive `Enable = 1` dove la voce manca o è vuota.
 - Opzioni usate: `-ini <file>`, `-play <tavolo>`, `-PrefPath`, `-ExtractVBS`. Su Linux log e dati vanno in `$XDG_DATA_HOME/VPinballX/10.8/`.
 - Riquadri incorporati (`BackglassOutput` / `ScoreViewOutput = 2`): senza posizione e dimensioni esplicite occupano tutta la finestra. `…WndX/WndY/Width/Height` sono in pixel dell'immagine disegnata, cioè schermo × `AAFactor`.
 - Sincronizzazione: il predefinito `SyncMode = 3` (frame pacing) sul PC dell'utente dava 52 fps medi con cali a 25. `SyncMode = 1` (vsync) tiene la frequenza del monitor. `MaxFramerate` viene ignorato con il vsync acceso; vale con `SyncMode = 0`.
