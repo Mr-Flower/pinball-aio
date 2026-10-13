@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use update::{Outcome, Progress, VPINBALL, VPINFE};
 
 /// Aggiorna i due programmi e scrive la configurazione. Restituisce l'eseguibile di VPinFE.
@@ -43,18 +43,20 @@ fn prepare(paths: &Paths, screen: (u32, u32), report: &dyn Fn(Progress)) -> Resu
     Ok(vpinfe)
 }
 
-/// Sistema in cartelle i tavoli copiati in `tables/` e, se ce ne sono di nuovi, fa creare a
-/// VPinFE le schede con copertine e applicare le patch agli script. Un errore qui non
+/// Sistema in cartelle i tavoli copiati in `tables/` e, se ce ne sono di nuovi (appena
+/// spostati, o cartelle senza scheda mai viste prima), fa creare a VPinFE le schede con
+/// copertine e applicare le patch agli script. Un errore qui non
 /// blocca l'avvio: i tavoli già pronti restano giocabili.
 fn prepare_tables(paths: &Paths, vpinfe: &Path, report: &dyn Fn(Progress)) {
     let moved = library::organize(paths).unwrap_or_else(|e| {
         eprintln!("riordino dei tavoli non riuscito: {e}");
         0
     });
-    let (tables, with_info) = library::count(paths);
-    if moved == 0 && (tables == 0 || with_info > 0) {
+    let tried = library::tried(paths);
+    if moved == 0 && library::without_info(paths).iter().all(|name| tried.contains(name)) {
         return;
     }
+    let tables = library::count(paths);
     for (flag, text) in [
         ("--buildmeta", format!("Preparo {tables} tavoli: schede e copertine…")),
         ("--vpxpatch", "Applico le patch agli script dei tavoli…".to_string()),
@@ -66,20 +68,22 @@ fn prepare_tables(paths: &Paths, vpinfe: &Path, report: &dyn Fn(Progress)) {
             Err(e) => eprintln!("vpinfe {flag}: {e}"),
         }
     }
+    // I tavoli che VPinFE non ha riconosciuto restano senza scheda finché non li si abbina
+    // a mano: si annotano, così non si rifà tutto il giro a ogni avvio per loro.
+    if let Err(e) = library::set_tried(paths, &library::without_info(paths)) {
+        eprintln!("elenco dei tavoli senza scheda non salvato: {e}");
+    }
 }
 
 fn vpinfe_command(paths: &Paths, vpinfe: &Path) -> Command {
-    // Su Windows VPinFE va avviato dal suo .bat, come indica la sua documentazione.
-    #[cfg(windows)]
-    let mut command = {
-        use std::os::windows::process::CommandExt;
-        let mut c = Command::new("cmd");
-        c.arg("/C").arg(vpinfe).creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        c
-    };
-    #[cfg(not(windows))]
     let mut command = Command::new(vpinfe);
-
+    // Su Windows si avvia vpinfe.exe dalla sua cartella, che è ciò che fa il suo vpinfe.bat:
+    // passando da `cmd /C` i percorsi con spazi si rompono.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
     command.arg("--configdir").arg(paths.vpinfe_config());
     if let Some(dir) = vpinfe.parent() {
         command.current_dir(dir);
@@ -109,7 +113,7 @@ fn stop(mut child: Child) {
 }
 
 fn has_tables(paths: &Paths) -> bool {
-    library::count(paths).0 > 0
+    library::count(paths) > 0
 }
 
 fn manager_url(paths: &Paths) -> (u16, String) {
@@ -123,13 +127,15 @@ fn manager_url(paths: &Paths) -> (u16, String) {
 
 const FALLBACK_SCREEN: (u32, u32) = (1920, 1080);
 
-/// Risoluzione del monitor in pixel; è nota solo dopo che la finestra è comparsa.
-fn screen_size(ctx: &egui::Context) -> (u32, u32) {
+/// Quanto si aspetta che il sistema dica su quale monitor è la finestra.
+const SCREEN_WAIT: Duration = Duration::from_secs(2);
+
+/// Risoluzione del monitor in pixel. È nota solo qualche fotogramma dopo che la finestra
+/// è comparsa: fino ad allora `None`.
+fn screen_size(ctx: &egui::Context) -> Option<(u32, u32)> {
     let scale = ctx.native_pixels_per_point().unwrap_or(1.0);
-    match ctx.input(|i| i.viewport().monitor_size) {
-        Some(size) if size.x >= 640.0 => ((size.x * scale).round() as u32, (size.y * scale).round() as u32),
-        _ => FALLBACK_SCREEN,
-    }
+    let size = ctx.input(|i| i.viewport().monitor_size).filter(|size| size.x >= 640.0)?;
+    Some(((size.x * scale).round() as u32, (size.y * scale).round() as u32))
 }
 
 #[derive(Default)]
@@ -158,6 +164,9 @@ struct App {
     folder_error: Option<String>,
     import: Option<Import>,
     started: bool,
+    /// VPinFE è partito e la finestra si sta chiudendo: non c'è altro da fare.
+    launched: bool,
+    opened_at: Instant,
 }
 
 impl App {
@@ -165,7 +174,7 @@ impl App {
         let Some(paths) = self.paths.clone() else { return };
         self.started = true;
         *self.state.lock().unwrap() = State { text: "Avvio…".into(), ..State::default() };
-        let screen = screen_size(ctx);
+        let screen = screen_size(ctx).unwrap_or(FALLBACK_SCREEN);
         let (state, ctx) = (self.state.clone(), ctx.clone());
         std::thread::spawn(move || {
             let report = |p: Progress| {
@@ -212,14 +221,23 @@ impl App {
         }
     }
 
+    /// Apre la libreria e chiude il launcher. Dopo la richiesta di chiusura la finestra
+    /// disegna ancora un fotogramma: `launched` evita che VPinFE parta una seconda volta.
+    fn launch_and_close(&mut self, ctx: &egui::Context, paths: &Paths, vpinfe: &Path) {
+        match launch(paths, vpinfe, false) {
+            Ok(_) => {
+                self.launched = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Err(e) => self.fail(e),
+        }
+    }
+
     /// Con dei tavoli apre la libreria e chiude il launcher. Senza tavoli la libreria
     /// sarebbe una schermata vuota: si apre invece la pagina da cui importarli.
     fn open_vpinfe(&mut self, ctx: &egui::Context, paths: &Paths, vpinfe: PathBuf) {
         if has_tables(paths) {
-            match launch(paths, &vpinfe, false) {
-                Ok(_) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
-                Err(e) => self.fail(e),
-            }
+            self.launch_and_close(ctx, paths, &vpinfe);
             return;
         }
         let child = match launch(paths, &vpinfe, true) {
@@ -269,10 +287,7 @@ impl App {
         if play {
             if let Some(import) = self.import.take() {
                 stop(import.child);
-                match launch(paths, &import.vpinfe, false) {
-                    Ok(_) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
-                    Err(e) => self.fail(e),
-                }
+                self.launch_and_close(ctx, paths, &import.vpinfe);
             }
         }
     }
@@ -291,6 +306,7 @@ impl App {
                     None => ui.add(egui::Spinner::new()),
                 };
             }
+            Some(Ok(_)) if self.launched => {}
             Some(Ok(_)) if self.import.is_some() => self.import_screen(ctx, ui, paths),
             Some(Ok(vpinfe)) => self.open_vpinfe(ctx, paths, vpinfe),
             Some(Err(message)) => {
@@ -314,9 +330,14 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Si parte dal primo fotogramma e non prima: serve la risoluzione del monitor.
+        // Si parte quando è nota la risoluzione del monitor, che serve per creare
+        // VPinballX.ini; se non arriva si prosegue lo stesso con quella di ripiego.
         if !self.started {
-            self.start(ctx);
+            if screen_size(ctx).is_some() || self.opened_at.elapsed() >= SCREEN_WAIT {
+                self.start(ctx);
+            } else {
+                ctx.request_repaint_after(Duration::from_millis(50));
+            }
         }
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(12.0);
@@ -379,6 +400,8 @@ fn main() {
         folder_error: None,
         import: None,
         started: false,
+        launched: false,
+        opened_at: Instant::now(),
     };
     let result = eframe::run_native(
         "Pinball AIO",

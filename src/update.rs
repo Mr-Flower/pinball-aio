@@ -56,7 +56,7 @@ pub const VPINFE: Component = Component {
     #[cfg(target_os = "linux")]
     is_exe: |n| n == "vpinfe",
     #[cfg(windows)]
-    is_exe: |n| n == "vpinfe.bat",
+    is_exe: |n| n == "vpinfe.exe",
 };
 
 #[derive(Deserialize)]
@@ -64,6 +64,8 @@ struct Release {
     tag_name: String,
     #[serde(default)]
     draft: bool,
+    #[serde(default)]
+    prerelease: bool,
     assets: Vec<Asset>,
 }
 
@@ -115,10 +117,11 @@ fn wanted_asset(component: &Component) -> Result<(String, Asset)> {
 }
 
 /// La release più recente (GitHub le elenca dalla più nuova) con un pacchetto per questo sistema.
+/// Le pre-release valgono solo per un componente fissato: lì la scelta è già stata fatta a mano.
 fn pick(releases: Vec<Release>, component: &Component) -> Option<(String, Asset)> {
     releases
         .into_iter()
-        .filter(|r| !r.draft)
+        .filter(|r| !r.draft && (component.pin.is_some() || !r.prerelease))
         .find_map(|r| {
             let asset = r.assets.into_iter().find(|a| (component.is_asset)(&a.name))?;
             Some((r.tag_name, asset))
@@ -273,7 +276,7 @@ mod tests {
 
     fn release(tag: &str, draft: bool, asset: &str) -> Release {
         let asset = Asset { name: asset.to_string(), browser_download_url: String::new(), size: 0, digest: None };
-        Release { tag_name: tag.to_string(), draft, assets: vec![asset] }
+        Release { tag_name: tag.to_string(), draft, prerelease: false, assets: vec![asset] }
     }
 
     #[test]
@@ -282,8 +285,10 @@ mod tests {
         let package = "vpinfe-v2.6.6-linux-x64.zip";
         #[cfg(windows)]
         let package = "vpinfe-v2.6.6-win-x64.zip";
+        let beta = Release { prerelease: true, ..release("v2.7.0-beta", false, package) };
         let releases = vec![
             release("v2.7.0", true, package),
+            beta,
             release("v2.6.7", false, "vpinfe-v2.6.7-macos-arm64.zip"),
             release("v2.6.6", false, package),
             release("v2.6.5", false, package),
@@ -295,5 +300,15 @@ mod tests {
     fn the_engine_is_pinned_and_the_frontend_is_not() {
         assert!(VPINBALL.pin.is_some());
         assert!(VPINFE.pin.is_none());
+    }
+
+    #[test]
+    fn a_pinned_release_can_be_a_prerelease() {
+        #[cfg(target_os = "linux")]
+        let package = "VPinballX_BGFX-10.8.1-5436-af26b2d93-linux-x64-Release.tar.gz";
+        #[cfg(windows)]
+        let package = "VPinballX_BGFX-10.8.1-5436-af26b2d93-windows-x64-Release.zip";
+        let pinned = Release { prerelease: true, ..release("v10.8.1-5436-af26b2d93", false, package) };
+        assert!(pick(vec![pinned], &VPINBALL).is_some());
     }
 }

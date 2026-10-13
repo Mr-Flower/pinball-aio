@@ -106,6 +106,11 @@ impl Paths {
         self.vpinfe_config().join("vpinfe.ini")
     }
 
+    /// Tavoli che VPinFE non ha riconosciuto, per non riprovarci a ogni avvio.
+    pub fn tried_file(&self) -> PathBuf {
+        self.config().join("tavoli-senza-scheda.txt")
+    }
+
     pub fn create_all(&self) -> std::io::Result<()> {
         for dir in [
             self.tables(),

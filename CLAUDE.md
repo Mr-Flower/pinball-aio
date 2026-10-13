@@ -2,7 +2,7 @@
 
 Launcher per Windows e Linux che scarica, tiene aggiornati e avvia **VPinballX** (il motore) e **VPinFE** (la libreria dei tavoli), già configurati tra loro. Modello di riferimento: Pocket Pinball / l'app VPX per Android, cioè "installa e gioca".
 
-- Repository: https://github.com/Mr-Flower/pinball-aio (pubblico), ultima release `v0.1.2`.
+- Repository: https://github.com/Mr-Flower/pinball-aio (pubblico), ultima release `v0.1.3`.
 - Il valore del progetto è solo la semplicità: nessun percorso da impostare. Multi-schermo, cabinet e personalizzazione spinta sono fuori scopo.
 
 ## Decisioni prese (2026-10-10)
@@ -23,7 +23,7 @@ A ogni avvio (`src/main.rs`, funzione `prepare`):
 1. `paths.rs`: trova la cartella dati. Ordine: variabile `PINBALL_AIO_DIR`, cartella `PinballData` accanto all'eseguibile, percorso salvato in `~/.config/pinball-aio/location.txt`. Se manca o è stata cancellata, la finestra la chiede.
 2. `update.rs`: per ciascuno dei due programmi legge da GitHub la release voluta (quella fissata per VPinballX, l'ultima per VPinFE), e se il tag è diverso da quello in `engine/versions.json` scarica, verifica l'sha256, estrae e scambia le cartelle. La versione precedente resta in `engine/<nome>.old`. Senza rete parte con ciò che è installato.
 3. `config.rs`: crea `config/VPinballX.ini` solo se manca; riscrive sempre in `vpinfe.ini` i quattro percorsi `vpxbinpath`, `tablerootdir`, `vpxinipath`, `globalinioverride`. Se il motore cambia tra build con numerazione diversa di `BackglassOutput` / `ScoreViewOutput`, scambia 1 e 2 in `VPinballX.ini`.
-4. `library.rs`: sposta i `.vpx` sciolti in `tables/` in una cartella per tavolo (nome tagliato a "Titolo (Marca Anno)"), con i file dallo stesso nome. Se ci sono tavoli nuovi lancia `vpinfe --buildmeta` (schede `.info` e copertine) e `vpinfe --vpxpatch` (patch degli script).
+4. `library.rs`: sposta i `.vpx` sciolti in `tables/` in una cartella per tavolo (nome tagliato a "Titolo (Marca Anno)"), con i file dallo stesso nome. Se ci sono tavoli nuovi (appena spostati, oppure cartelle senza `.info` non ancora elencate in `config/tavoli-senza-scheda.txt`) lancia `vpinfe --buildmeta` (schede `.info` e copertine) e `vpinfe --vpxpatch` (patch degli script).
 5. Avvia VPinFE. Se non c'è nessun tavolo lo avvia `--headless` e apre nel browser la sua pagina di gestione, con un pulsante per passare poi alla libreria.
 
 `pinball-aio --cli --no-launch` fa i passi 1-4 senza finestra: utile per provare.
@@ -37,6 +37,7 @@ A ogni avvio (`src/main.rs`, funzione `prepare`):
   config/VPinballX.ini            impostazioni del motore, dell'utente dopo la creazione
   config/vpinfe/                  vpinfe.ini, temi, log di VPinFE
   config/vpx-data/                log e dati del motore (solo Linux)
+  config/tavoli-senza-scheda.txt  tavoli che VPinFE non ha riconosciuto (c'è solo se ce ne sono)
   engine/vpinball|vpinfe/         più <nome>.old e versions.json
 ```
 
@@ -59,7 +60,7 @@ A ogni avvio (`src/main.rs`, funzione `prepare`):
 
 **VPinFE 2.6.6**
 
-- Pacchetto completo `vpinfe-<tag>-linux-x64.zip` / `-win-x64.zip` (con Chromium); su Windows si avvia da `vpinfe.bat`.
+- Pacchetto completo `vpinfe-<tag>-linux-x64.zip` / `-win-x64.zip` (con Chromium). Su Windows lo zip contiene `vpinfe/vpinfe.exe` e un `vpinfe.bat` che fa solo `cd` nella sua cartella e lo avvia: il launcher avvia direttamente l'exe da quella cartella (con `cmd /C` i percorsi con spazi si rompono).
 - Vede solo cartelle con un `.vpx` e un `.info`. I tavoli non riconosciuti dal nome vanno abbinati a mano in "Unmatched Tables".
 - `--configdir DIR`, `--headless`, `--buildmeta`, `--vpxpatch`, `--gamepadtest`. Pagina di gestione su `http://localhost:8001`.
 - `globalinioverride` è il file passato al motore con `-ini`; `vpxlaunchenv` imposta variabili d'ambiente per il motore (usato per `XDG_DATA_HOME`).
@@ -68,6 +69,7 @@ A ogni avvio (`src/main.rs`, funzione `prepare`):
 **Build e pubblicazione**
 
 - Rust + eframe (egui) per la finestra, `rfd` per il selettore di cartelle; niente Tauri né web.
+- eframe: dopo `ViewportCommand::Close` viene disegnato ancora un fotogramma, e `monitor_size` è vuoto nei primi due (su KDE Wayland arriva dal terzo, circa 0,1 s).
 - `packaging/build-appimage.sh [cartella]` crea l'AppImage. Fallisce con "Text file busy" se l'AppImage di destinazione è in esecuzione.
 - `.github/workflows/release.yml`: un tag `v*` costruisce AppImage ed exe e crea la release; avviato a mano costruisce soltanto.
 - I test girano anche su Windows: nei confronti non scrivere percorsi con `/` fissi.
@@ -76,8 +78,8 @@ A ogni avvio (`src/main.rs`, funzione `prepare`):
 
 - **Motore fermo sulla 5436:** quando esce una release successiva va provata prima di spostare `pin` (Metallica senza lo script accanto: tiro al serpente). Altri tavoli Stern SAM con meccanismi sui solenoidi 51–58 possono avere lo stesso difetto; il launcher non li corregge.
 - **Lancio della pallina diverso da Pocket Pinball** su Metallica (arriva in un altro punto): non indagato.
-- **Windows mai provato dal vivo:** l'exe compila e passa i test su GitHub, ma nessuno l'ha avviato. Lì il motore scrive ancora impostazioni e log in `%APPDATA%\VPinballX`, fuori dalla cartella dati.
-- **Installazione da zero mai provata con la v0.1.1:** i default grafici sono coperti solo da un test automatico; il percorso "nessun tavolo → pagina di gestione" non è stato visto funzionare dall'inizio alla fine.
+- **Windows mai provato dal vivo:** l'exe compila e passa i test su GitHub, ma nessuno l'ha avviato (controllati solo i nomi dentro gli zip: `VPinballX_BGFX64.exe`, `vpinfe/vpinfe.exe`). Lì il motore scrive ancora impostazioni e log in `%APPDATA%\VPinballX`, fuori dalla cartella dati.
+- **Installazione da zero** provata il 2026-10-13 solo con `--cli` in una cartella temporanea (scarica, configura, prepara un tavolo; VPinFE `--headless` risponde sulla 8001). Dalla finestra, il percorso "nessun tavolo → pagina di gestione → apri la libreria" non è stato visto dall'inizio alla fine.
 - **DMD doppio:** sui tavoli con un DMD proprio, quello ScoreView è un duplicato. Spostando l'arancione, quello verde di Metallica risulta tagliato: causa non trovata (sospettato il riquadro del backglass a tutta finestra, `BackglassOutput = 0` per escluderlo).
 - **Sfondo di Metallica:** l'utente ricorda uno sfondo dietro il tavolo che poi è sparito; con le impostazioni originali non ricompare e non si è capito da dove venisse.
 - **Default grafici tarati su un solo PC**, con grafica integrata (Radeon 680M, 2560×1440). Il DMD in alto a sinistra copre il DMD proprio di Metallica, ma altri tavoli possono averlo altrove.

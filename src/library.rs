@@ -4,7 +4,7 @@
 use crate::paths::Paths;
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 fn is_vpx(path: &Path) -> bool {
     path.extension().is_some_and(|e| e.eq_ignore_ascii_case("vpx"))
@@ -54,18 +54,50 @@ pub fn organize(paths: &Paths) -> io::Result<usize> {
     Ok(moved)
 }
 
-/// Cartelle dei tavoli: quante sono e quante hanno già il file `.info` che VPinFE
-/// richiede per mostrarle.
-pub fn count(paths: &Paths) -> (usize, usize) {
-    let has_ext = |dir: &Path, ext: &str| {
-        fs::read_dir(dir).is_ok_and(|files| {
-            files.flatten().any(|f| f.path().extension().is_some_and(|e| e.eq_ignore_ascii_case(ext)))
-        })
-    };
-    let Ok(folders) = fs::read_dir(paths.tables()) else { return (0, 0) };
-    let tables: Vec<_> = folders.flatten().map(|f| f.path()).filter(|p| has_ext(p, "vpx")).collect();
-    let with_info = tables.iter().filter(|p| has_ext(p, "info")).count();
-    (tables.len(), with_info)
+fn has_ext(dir: &Path, ext: &str) -> bool {
+    fs::read_dir(dir).is_ok_and(|files| {
+        files.flatten().any(|f| f.path().extension().is_some_and(|e| e.eq_ignore_ascii_case(ext)))
+    })
+}
+
+/// Cartelle dentro `tables/` che contengono un `.vpx`.
+fn table_folders(paths: &Paths) -> Vec<PathBuf> {
+    let Ok(folders) = fs::read_dir(paths.tables()) else { return Vec::new() };
+    folders.flatten().map(|f| f.path()).filter(|p| has_ext(p, "vpx")).collect()
+}
+
+/// Quante cartelle di tavoli ci sono.
+pub fn count(paths: &Paths) -> usize {
+    table_folders(paths).len()
+}
+
+/// Nomi delle cartelle dei tavoli ancora senza il file `.info` che VPinFE richiede per
+/// mostrarle, in ordine alfabetico.
+pub fn without_info(paths: &Paths) -> Vec<String> {
+    let mut names: Vec<String> = table_folders(paths)
+        .iter()
+        .filter(|p| !has_ext(p, "info"))
+        .filter_map(|p| Some(p.file_name()?.to_str()?.to_string()))
+        .collect();
+    names.sort();
+    names
+}
+
+/// Tavoli rimasti senza scheda dopo l'ultimo passaggio di VPinFE (vedi `set_tried`).
+pub fn tried(paths: &Paths) -> Vec<String> {
+    fs::read_to_string(paths.tried_file())
+        .map(|text| text.lines().map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+pub fn set_tried(paths: &Paths, names: &[String]) -> io::Result<()> {
+    if names.is_empty() {
+        return match fs::remove_file(paths.tried_file()) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        };
+    }
+    fs::write(paths.tried_file(), names.join("\n") + "\n")
 }
 
 #[cfg(test)]
@@ -92,15 +124,25 @@ mod tests {
             fs::write(tables.join(name), b"x").unwrap();
         }
         fs::write(tables.join("Already (Stern 2000)").join("Already.vpx"), b"x").unwrap();
-        assert_eq!(count(&paths), (1, 0));
+        assert_eq!(count(&paths), 1);
 
         assert_eq!(organize(&paths).unwrap(), 1);
         let folder = tables.join("Hurricane (Williams 1991)");
         assert!(folder.join("Hurricane (Williams 1991) v2.vpx").is_file());
         assert!(folder.join("Hurricane (Williams 1991) v2.directb2s").is_file());
         assert!(tables.join("orphan.directb2s").is_file());
-        assert_eq!(count(&paths), (2, 0));
+        assert_eq!(count(&paths), 2);
         assert_eq!(organize(&paths).unwrap(), 0);
+
+        // Senza scheda ci sono tutti e due; una volta annotati, resta da fare solo chi arriva dopo.
+        assert_eq!(without_info(&paths), ["Already (Stern 2000)", "Hurricane (Williams 1991)"]);
+        assert!(tried(&paths).is_empty());
+        fs::write(folder.join("Hurricane (Williams 1991).info"), b"{}").unwrap();
+        fs::create_dir_all(paths.config()).unwrap();
+        set_tried(&paths, &without_info(&paths)).unwrap();
+        assert_eq!(tried(&paths), ["Already (Stern 2000)"]);
+        set_tried(&paths, &[]).unwrap();
+        assert!(tried(&paths).is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 }
