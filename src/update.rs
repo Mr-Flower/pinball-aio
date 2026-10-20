@@ -1,6 +1,7 @@
-//! Scarica e aggiorna i due programmi dalle loro release ufficiali su GitHub.
-//! I binari non vengono ridistribuiti: arrivano non modificati dai repository originali.
+//! Scarica e aggiorna il motore dalle sue release ufficiali su GitHub.
+//! I binari non vengono ridistribuiti: arrivano non modificati dal repository originale.
 
+use crate::net::agent;
 use crate::paths::Paths;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
@@ -9,9 +10,6 @@ use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
-
-const USER_AGENT: &str = concat!("pinball-aio/", env!("CARGO_PKG_VERSION"));
 
 pub struct Component {
     pub id: &'static str,
@@ -43,22 +41,6 @@ pub const VPINBALL: Component = Component {
     is_exe: |n| n.starts_with("VPinballX_BGFX") && n.ends_with(".exe"),
 };
 
-// VPinFE: si usa la build completa (con Chromium incluso), così non serve altro sul sistema.
-pub const VPINFE: Component = Component {
-    id: "vpinfe",
-    name: "VPinFE",
-    repo: "superhac/vpinfe",
-    pin: None,
-    #[cfg(target_os = "linux")]
-    is_asset: |n| n.starts_with("vpinfe-") && n.ends_with("-linux-x64.zip"),
-    #[cfg(windows)]
-    is_asset: |n| n.starts_with("vpinfe-") && n.ends_with("-win-x64.zip"),
-    #[cfg(target_os = "linux")]
-    is_exe: |n| n == "vpinfe",
-    #[cfg(windows)]
-    is_exe: |n| n == "vpinfe.exe",
-};
-
 #[derive(Deserialize)]
 struct Release {
     tag_name: String,
@@ -87,14 +69,6 @@ pub struct Progress {
 pub enum Outcome {
     UpToDate(String),
     Updated(String),
-}
-
-fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(15))
-        .timeout_read(Duration::from_secs(60))
-        .user_agent(USER_AGENT)
-        .build()
 }
 
 fn github<T: serde::de::DeserializeOwned>(url: &str) -> Result<T> {
@@ -194,7 +168,7 @@ fn download(asset: &Asset, dest: &Path, name: &str, report: &dyn Fn(Progress)) -
         bail!("download incompleto ({done} byte su {})", asset.size);
     }
     if let Some(expected) = asset.digest.as_deref().and_then(|d| d.strip_prefix("sha256:")) {
-        let actual: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        let actual = crate::hash::hex(&hasher.finalize());
         if !actual.eq_ignore_ascii_case(expected) {
             bail!("il file scaricato è corrotto (sha256 diverso da quello pubblicato)");
         }
@@ -270,6 +244,31 @@ pub fn update(paths: &Paths, component: &Component, report: &dyn Fn(Progress)) -
     Ok(Outcome::Updated(tag))
 }
 
+/// Cancella VPinFE, che le versioni fino alla 0.1.4 installavano come libreria dei tavoli:
+/// il programma, le sue versioni precedenti e la sua configurazione. Le schede dei tavoli
+/// (`.info`) e le copertine restano, perché la libreria nuova le usa.
+pub fn remove_vpinfe(paths: &Paths) {
+    let mut removed = false;
+    for dir in ["vpinfe", "vpinfe.old", "vpinfe.new"].map(|d| paths.engine().join(d)).into_iter().chain([paths.retired_vpinfe_config()]) {
+        if dir.exists() {
+            match fs::remove_dir_all(&dir) {
+                Ok(()) => removed = true,
+                Err(e) => eprintln!("impossibile cancellare {}: {e}", dir.display()),
+            }
+        }
+    }
+    let mut versions = read_versions(paths);
+    if versions.remove("vpinfe").is_some() {
+        removed = true;
+        if let Ok(bytes) = serde_json::to_vec_pretty(&versions) {
+            let _ = fs::write(paths.versions_file(), bytes);
+        }
+    }
+    if removed {
+        eprintln!("VPinFE rimosso: la libreria ora è quella di Pinball AIO");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,25 +280,39 @@ mod tests {
 
     #[test]
     fn picks_the_newest_release_with_a_package_for_this_system() {
-        #[cfg(target_os = "linux")]
-        let package = "vpinfe-v2.6.6-linux-x64.zip";
-        #[cfg(windows)]
-        let package = "vpinfe-v2.6.6-win-x64.zip";
+        let latest = Component { pin: None, is_asset: |n| n.ends_with("-x64.zip"), ..VPINBALL };
+        let package = "app-x64.zip";
         let beta = Release { prerelease: true, ..release("v2.7.0-beta", false, package) };
         let releases = vec![
             release("v2.7.0", true, package),
             beta,
-            release("v2.6.7", false, "vpinfe-v2.6.7-macos-arm64.zip"),
+            release("v2.6.7", false, "app-macos-arm64.zip"),
             release("v2.6.6", false, package),
             release("v2.6.5", false, package),
         ];
-        assert_eq!(pick(releases, &VPINFE).unwrap().0, "v2.6.6");
+        assert_eq!(pick(releases, &latest).unwrap().0, "v2.6.6");
     }
 
     #[test]
-    fn the_engine_is_pinned_and_the_frontend_is_not() {
+    fn vpinfe_is_removed_but_the_engine_stays() {
+        let root = std::env::temp_dir().join(format!("pinball-aio-retire-{}", std::process::id()));
+        let paths = Paths { root: root.clone() };
+        for dir in ["engine/vpinfe/vpinfe", "engine/vpinfe.old", "engine/vpinball", "config/vpinfe"] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        fs::write(paths.versions_file(), r#"{"vpinball":"v1","vpinfe":"v2"}"#).unwrap();
+        remove_vpinfe(&paths);
+        assert!(!root.join("engine/vpinfe").exists() && !root.join("engine/vpinfe.old").exists());
+        assert!(!root.join("config/vpinfe").exists());
+        assert!(root.join("engine/vpinball").is_dir());
+        assert_eq!(installed_version(&paths, &VPINBALL).as_deref(), Some("v1"));
+        assert_eq!(read_versions(&paths).len(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_engine_is_pinned() {
         assert!(VPINBALL.pin.is_some());
-        assert!(VPINFE.pin.is_none());
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Mette in ordine la cartella `tables/`: l'utente può buttarci i file così come sono,
-//! il launcher crea una cartella per tavolo come richiedono VPinballX e VPinFE.
+//! il launcher crea una cartella per tavolo come richiede VPinballX.
 
+use crate::files;
 use crate::paths::Paths;
 use std::fs;
 use std::io;
@@ -54,36 +55,33 @@ pub fn organize(paths: &Paths) -> io::Result<usize> {
     Ok(moved)
 }
 
+/// Estensioni dei file presenti in una cartella, in minuscolo.
+fn extensions(dir: &Path) -> Vec<String> {
+    let Ok(files) = fs::read_dir(dir) else { return Vec::new() };
+    files.flatten().filter_map(|f| Some(f.path().extension()?.to_string_lossy().to_lowercase())).collect()
+}
+
 fn has_ext(dir: &Path, ext: &str) -> bool {
-    fs::read_dir(dir).is_ok_and(|files| {
-        files.flatten().any(|f| f.path().extension().is_some_and(|e| e.eq_ignore_ascii_case(ext)))
-    })
+    extensions(dir).iter().any(|e| e == ext)
 }
 
-/// Cartelle dentro `tables/` che contengono un `.vpx`.
-fn table_folders(paths: &Paths) -> Vec<PathBuf> {
-    let Ok(folders) = fs::read_dir(paths.tables()) else { return Vec::new() };
-    folders.flatten().map(|f| f.path()).filter(|p| has_ext(p, "vpx")).collect()
-}
-
-/// Quante cartelle di tavoli ci sono.
-pub fn count(paths: &Paths) -> usize {
-    table_folders(paths).len()
-}
-
-/// Nomi delle cartelle dei tavoli ancora senza il file `.info` che VPinFE richiede per
-/// mostrarle, in ordine alfabetico.
+/// Nomi delle cartelle dei tavoli (quelle con un `.vpx`) ancora senza scheda (`.info`),
+/// in ordine alfabetico.
 pub fn without_info(paths: &Paths) -> Vec<String> {
-    let mut names: Vec<String> = table_folders(paths)
-        .iter()
-        .filter(|p| !has_ext(p, "info"))
-        .filter_map(|p| Some(p.file_name()?.to_str()?.to_string()))
+    let Ok(folders) = fs::read_dir(paths.tables()) else { return Vec::new() };
+    let mut names: Vec<String> = folders
+        .flatten()
+        .filter(|f| {
+            let found = extensions(&f.path());
+            found.iter().any(|e| e == "vpx") && !found.iter().any(|e| e == "info")
+        })
+        .filter_map(|f| f.file_name().to_str().map(str::to_string))
         .collect();
     names.sort();
     names
 }
 
-/// Tavoli rimasti senza scheda dopo l'ultimo passaggio di VPinFE (vedi `set_tried`).
+/// Tavoli rimasti senza scheda dopo l'ultima preparazione (vedi `set_tried`).
 pub fn tried(paths: &Paths) -> Vec<String> {
     fs::read_to_string(paths.tried_file())
         .map(|text| text.lines().map(str::to_string).collect())
@@ -100,6 +98,63 @@ pub fn set_tried(paths: &Paths, names: &[String]) -> io::Result<()> {
     fs::write(paths.tried_file(), names.join("\n") + "\n")
 }
 
+/// Cosa è successo ai file aggiunti con `import`.
+#[derive(Debug, Default, PartialEq)]
+pub struct Imported {
+    pub tables: usize,
+    pub roms: usize,
+    /// Nomi dei file non copiati, con il motivo.
+    pub skipped: Vec<String>,
+}
+
+/// File che vanno accanto al tavolo: il tavolo, il backglass, lo script e le impostazioni.
+pub const TABLE_FILES: [&str; 4] = ["vpx", "directb2s", "vbs", "ini"];
+
+/// Copia nella cartella dati i file scelti dall'utente: tavoli e loro file in `tables/`
+/// (poi sistemati in cartelle da `organize`), ROM `.zip` in `pinmame/roms`, cartelle che
+/// contengono un `.vpx` così come sono. Gli originali restano dove sono e un file già
+/// presente non si sovrascrive mai.
+pub fn import(paths: &Paths, files: &[PathBuf]) -> io::Result<Imported> {
+    let mut result = Imported::default();
+    fs::create_dir_all(paths.tables())?;
+    fs::create_dir_all(paths.pinmame().join("roms"))?;
+    for file in files {
+        let Some(name) = file.file_name() else { continue };
+        let shown = name.to_string_lossy().into_owned();
+        let ext = file.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        let (target, is_table, is_rom) = if file.is_dir() {
+            if !has_ext(file, "vpx") {
+                result.skipped.push(format!("{shown}: la cartella non contiene un tavolo (.vpx)"));
+                continue;
+            }
+            (paths.tables().join(name), true, false)
+        } else if ext == "zip" {
+            (paths.pinmame().join("roms").join(name), false, true)
+        } else if TABLE_FILES.contains(&ext.as_str()) {
+            (paths.tables().join(name), ext == "vpx", false)
+        } else {
+            result.skipped.push(format!("{shown}: tipo di file non riconosciuto"));
+            continue;
+        };
+        // Un file di tavolo già sistemato nella sua cartella da un'importazione precedente.
+        let stem = file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let in_folder = !file.is_dir() && !is_rom && paths.tables().join(folder_name(&stem)).join(name).exists();
+        if target.exists() || in_folder {
+            result.skipped.push(format!("{shown}: c'è già"));
+            continue;
+        }
+        if file.is_dir() {
+            files::copy_dir(file, &target)?;
+        } else {
+            files::copy_atomic(file, &target)?;
+        }
+        result.tables += usize::from(is_table);
+        result.roms += usize::from(is_rom);
+    }
+    organize(paths)?;
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,6 +169,44 @@ mod tests {
         assert_eq!(folder_name("Broken (Name 1990"), "Broken (Name 1990");
     }
 
+    fn table_count(paths: &Paths) -> usize {
+        fs::read_dir(paths.tables()).unwrap().flatten().filter(|f| has_ext(&f.path(), "vpx")).count()
+    }
+
+    #[test]
+    fn import_copies_tables_roms_and_table_folders() {
+        let root = std::env::temp_dir().join(format!("pinball-aio-import-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let source = root.join("source");
+        let folder = source.join("Medieval Madness (Williams 1997)");
+        fs::create_dir_all(folder.join("medias")).unwrap();
+        fs::write(folder.join("mm.vpx"), b"x").unwrap();
+        fs::write(folder.join("medias").join("bg.png"), b"x").unwrap();
+        fs::create_dir_all(source.join("not a table")).unwrap();
+        for name in ["Fish Tales (Williams 1992) v2.vpx", "Fish Tales (Williams 1992) v2.directb2s", "ft_l5.zip", "notes.pdf"] {
+            fs::write(source.join(name), b"x").unwrap();
+        }
+        let paths = Paths { root: root.join("data") };
+        let files: Vec<PathBuf> = ["Medieval Madness (Williams 1997)", "not a table", "Fish Tales (Williams 1992) v2.vpx",
+            "Fish Tales (Williams 1992) v2.directb2s", "ft_l5.zip", "notes.pdf"]
+            .iter()
+            .map(|n| source.join(n))
+            .collect();
+        let imported = import(&paths, &files).unwrap();
+        assert_eq!((imported.tables, imported.roms, imported.skipped.len()), (2, 1, 2));
+        assert!(paths.tables().join("Medieval Madness (Williams 1997)").join("medias").join("bg.png").is_file());
+        let fish = paths.tables().join("Fish Tales (Williams 1992)");
+        assert!(fish.join("Fish Tales (Williams 1992) v2.vpx").is_file());
+        assert!(fish.join("Fish Tales (Williams 1992) v2.directb2s").is_file());
+        assert!(paths.pinmame().join("roms").join("ft_l5.zip").is_file());
+        assert!(source.join("ft_l5.zip").is_file());
+
+        // La seconda volta non si copia né si sovrascrive niente.
+        let again = import(&paths, &files).unwrap();
+        assert_eq!((again.tables, again.roms, again.skipped.len()), (0, 0, 6));
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn organize_moves_tables_with_their_companion_files() {
         let root = std::env::temp_dir().join(format!("pinball-aio-test-{}", std::process::id()));
@@ -124,14 +217,14 @@ mod tests {
             fs::write(tables.join(name), b"x").unwrap();
         }
         fs::write(tables.join("Already (Stern 2000)").join("Already.vpx"), b"x").unwrap();
-        assert_eq!(count(&paths), 1);
+        assert_eq!(table_count(&paths), 1);
 
         assert_eq!(organize(&paths).unwrap(), 1);
         let folder = tables.join("Hurricane (Williams 1991)");
         assert!(folder.join("Hurricane (Williams 1991) v2.vpx").is_file());
         assert!(folder.join("Hurricane (Williams 1991) v2.directb2s").is_file());
         assert!(tables.join("orphan.directb2s").is_file());
-        assert_eq!(count(&paths), 2);
+        assert_eq!(table_count(&paths), 2);
         assert_eq!(organize(&paths).unwrap(), 0);
 
         // Senza scheda ci sono tutti e due; una volta annotati, resta da fare solo chi arriva dopo.

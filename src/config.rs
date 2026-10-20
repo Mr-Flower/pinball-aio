@@ -1,10 +1,9 @@
-//! Scrive la configurazione dei due programmi, così l'utente non imposta nessun percorso.
+//! Scrive la configurazione del motore, così l'utente non imposta nessun percorso.
 
 use crate::ini;
 use crate::paths::Paths;
 use std::fs;
 use std::io;
-use std::path::Path;
 
 /// Impostazioni iniziali del motore per un solo monitor in orizzontale, messe a punto su
 /// una grafica integrata (Radeon 680M) a 2560x1440:
@@ -102,7 +101,7 @@ fn enable_plugins(text: &str) -> String {
 
 /// `screen` è la risoluzione del monitor in pixel e `vpx_tag` la versione del motore
 /// installata: servono solo per creare `VPinballX.ini`.
-pub fn write(paths: &Paths, vpx_exe: &Path, vpx_tag: &str, screen: (u32, u32)) -> io::Result<()> {
+pub fn write(paths: &Paths, vpx_tag: &str, screen: (u32, u32)) -> io::Result<()> {
     if !paths.vpx_ini().exists() {
         fs::write(paths.vpx_ini(), default_vpx_ini(paths, screen, embedded_output(vpx_tag)))?;
     }
@@ -113,30 +112,7 @@ pub fn write(paths: &Paths, vpx_exe: &Path, vpx_tag: &str, screen: (u32, u32)) -
             fs::write(paths.vpx_ini(), enabled)?;
         }
     }
-
-    // I percorsi vengono riscritti a ogni avvio: restano giusti anche se la cartella
-    // dati viene spostata o un aggiornamento cambia posizione all'eseguibile.
-    let mut text = fs::read_to_string(paths.vpinfe_ini()).unwrap_or_default();
-    let vpx_ini = paths.vpx_ini();
-    for (key, value) in [
-        ("vpxbinpath", vpx_exe),
-        ("tablerootdir", &paths.tables()),
-        ("vpxinipath", &vpx_ini),
-        ("globalinioverride", &vpx_ini),
-    ] {
-        text = ini::set(&text, "Settings", key, &value.display().to_string());
-    }
-    // Il motore su Linux scrive log e dati in $XDG_DATA_HOME/VPinballX: lo si porta dentro
-    // la cartella dati, senza toccare un valore che l'utente ha impostato da sé.
-    #[cfg(target_os = "linux")]
-    {
-        let current = ini::get(&text, "Settings", "vpxlaunchenv").unwrap_or_default();
-        if current.is_empty() || current.starts_with("XDG_DATA_HOME=") {
-            let dir = paths.vpx_data().display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
-            text = ini::set(&text, "Settings", "vpxlaunchenv", &format!("XDG_DATA_HOME=\"{dir}\""));
-        }
-    }
-    fs::write(paths.vpinfe_ini(), text)
+    Ok(())
 }
 
 #[cfg(test)]

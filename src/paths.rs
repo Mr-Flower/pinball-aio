@@ -98,15 +98,21 @@ impl Paths {
         self.config().join("vpx-data")
     }
 
-    pub fn vpinfe_config(&self) -> PathBuf {
+    /// Configurazione di VPinFE, usato fino alla versione 0.1.4: si cancella al primo avvio.
+    pub fn retired_vpinfe_config(&self) -> PathBuf {
         self.config().join("vpinfe")
     }
 
-    pub fn vpinfe_ini(&self) -> PathBuf {
-        self.vpinfe_config().join("vpinfe.ini")
+    /// Database dei tavoli, indice delle copertine e miniature: si può cancellare, si rifà da sé.
+    pub fn cache(&self) -> PathBuf {
+        self.config().join("cache")
     }
 
-    /// Tavoli che VPinFE non ha riconosciuto, per non riprovarci a ogni avvio.
+    pub fn thumbs(&self) -> PathBuf {
+        self.cache().join("thumbs")
+    }
+
+    /// Tavoli non riconosciuti nel database, per non riprovarci a ogni avvio.
     pub fn tried_file(&self) -> PathBuf {
         self.config().join("tavoli-senza-scheda.txt")
     }
@@ -117,7 +123,7 @@ impl Paths {
             self.pinmame().join("roms"),
             self.pinmame().join("nvram"),
             self.engine(),
-            self.vpinfe_config(),
+            self.config(),
         ] {
             std::fs::create_dir_all(dir)?;
         }

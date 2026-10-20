@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=Pinball AIO
-Comment=Scarica, aggiorna e avvia VPinballX e VPinFE
+Comment=Libreria di tavoli per VPinballX: scarica il motore e avvia i tavoli
 Exec=pinball-aio
 Icon=pinball-aio
 Categories=Game;

@@ -1,128 +1,61 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod catalog;
 mod config;
+mod files;
+mod frontend;
+mod hash;
+mod images;
 mod ini;
 mod library;
+mod media;
+mod metadata;
+mod net;
+mod patches;
 mod paths;
+mod play;
 mod update;
+mod vps;
+mod vpx;
 
 use anyhow::{anyhow, Context, Result};
-use eframe::egui;
+use eframe::egui::{self, RichText};
+use frontend::theme;
+use frontend::widgets::{self, ButtonKind};
 use paths::Paths;
-use std::net::{Ipv4Addr, TcpStream};
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use update::{Outcome, Progress, VPINBALL, VPINFE};
+use update::{Outcome, Progress, VPINBALL};
 
-/// Aggiorna i due programmi e scrive la configurazione. Restituisce l'eseguibile di VPinFE.
-/// Se un controllo fallisce ma il programma è già installato si prosegue con quello che c'è.
+/// Aggiorna il motore, scrive la configurazione e prepara i tavoli nuovi. Restituisce
+/// l'eseguibile del motore. Se il controllo degli aggiornamenti fallisce ma il motore è
+/// già installato si prosegue con quello che c'è.
 fn prepare(paths: &Paths, screen: (u32, u32), report: &dyn Fn(Progress)) -> Result<PathBuf> {
     paths.create_all().with_context(|| format!("impossibile creare {}", paths.root.display()))?;
     let vpx_before = update::installed_version(paths, &VPINBALL);
-    for component in [&VPINBALL, &VPINFE] {
-        match update::update(paths, component, report) {
-            Ok(Outcome::UpToDate(tag)) => eprintln!("{} {tag}: già aggiornato", component.name),
-            Ok(Outcome::Updated(tag)) => eprintln!("{} aggiornato a {tag}", component.name),
-            Err(e) if update::exe_path(paths, component).is_some() => {
-                eprintln!("{}: aggiornamento saltato: {e:#}", component.name)
-            }
-            Err(e) => return Err(e.context(format!("installazione di {} non riuscita", component.name))),
+    match update::update(paths, &VPINBALL, report) {
+        Ok(Outcome::UpToDate(tag)) => eprintln!("{} {tag}: già aggiornato", VPINBALL.name),
+        Ok(Outcome::Updated(tag)) => eprintln!("{} aggiornato a {tag}", VPINBALL.name),
+        Err(e) if update::exe_path(paths, &VPINBALL).is_some() => {
+            eprintln!("{}: aggiornamento saltato: {e:#}", VPINBALL.name)
         }
+        Err(e) => return Err(e.context(format!("installazione di {} non riuscita", VPINBALL.name))),
     }
     let vpx = update::exe_path(paths, &VPINBALL).ok_or_else(|| anyhow!("VPinballX non trovato"))?;
     let vpx_tag = update::installed_version(paths, &VPINBALL).unwrap_or_default();
     if let Some(before) = vpx_before.filter(|before| *before != vpx_tag) {
         config::follow_engine(paths, &before, &vpx_tag).context("impossibile aggiornare VPinballX.ini")?;
     }
-    config::write(paths, &vpx, &vpx_tag, screen).context("impossibile scrivere la configurazione")?;
-    let vpinfe = update::exe_path(paths, &VPINFE).ok_or_else(|| anyhow!("VPinFE non trovato"))?;
-    prepare_tables(paths, &vpinfe, report);
-    Ok(vpinfe)
-}
-
-/// Sistema in cartelle i tavoli copiati in `tables/` e, se ce ne sono di nuovi (appena
-/// spostati, o cartelle senza scheda mai viste prima), fa creare a VPinFE le schede con
-/// copertine e applicare le patch agli script. Un errore qui non
-/// blocca l'avvio: i tavoli già pronti restano giocabili.
-fn prepare_tables(paths: &Paths, vpinfe: &Path, report: &dyn Fn(Progress)) {
-    let moved = library::organize(paths).unwrap_or_else(|e| {
+    config::write(paths, &vpx_tag, screen).context("impossibile scrivere la configurazione")?;
+    update::remove_vpinfe(paths);
+    // Un errore qui non blocca l'avvio: i tavoli già pronti restano giocabili.
+    if let Err(e) = library::organize(paths) {
         eprintln!("riordino dei tavoli non riuscito: {e}");
-        0
-    });
-    let tried = library::tried(paths);
-    if moved == 0 && library::without_info(paths).iter().all(|name| tried.contains(name)) {
-        return;
     }
-    let tables = library::count(paths);
-    for (flag, text) in [
-        ("--buildmeta", format!("Preparo {tables} tavoli: schede e copertine…")),
-        ("--vpxpatch", "Applico le patch agli script dei tavoli…".to_string()),
-    ] {
-        report(Progress { text, fraction: None });
-        match vpinfe_command(paths, vpinfe).arg(flag).status() {
-            Ok(status) if status.success() => {}
-            Ok(status) => eprintln!("vpinfe {flag}: uscito con {status}"),
-            Err(e) => eprintln!("vpinfe {flag}: {e}"),
-        }
-    }
-    // I tavoli che VPinFE non ha riconosciuto restano senza scheda finché non li si abbina
-    // a mano: si annotano, così non si rifà tutto il giro a ogni avvio per loro.
-    if let Err(e) = library::set_tried(paths, &library::without_info(paths)) {
-        eprintln!("elenco dei tavoli senza scheda non salvato: {e}");
-    }
-}
-
-fn vpinfe_command(paths: &Paths, vpinfe: &Path) -> Command {
-    let mut command = Command::new(vpinfe);
-    // Su Windows si avvia vpinfe.exe dalla sua cartella, che è ciò che fa il suo vpinfe.bat:
-    // passando da `cmd /C` i percorsi con spazi si rompono.
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    }
-    command.arg("--configdir").arg(paths.vpinfe_config());
-    if let Some(dir) = vpinfe.parent() {
-        command.current_dir(dir);
-    }
-    command
-}
-
-/// Avvia VPinFE. Con `headless` partono solo i suoi servizi, compresa la pagina di gestione
-/// da cui si importano i tavoli, senza la libreria a tutto schermo.
-fn launch(paths: &Paths, vpinfe: &Path, headless: bool) -> Result<Child> {
-    let mut command = vpinfe_command(paths, vpinfe);
-    if headless {
-        command.arg("--headless");
-    }
-    command.spawn().context("impossibile avviare VPinFE")
-}
-
-/// Chiude VPinFE e aspetta che sia uscito, così le sue porte tornano libere.
-/// SIGTERM e non kill: VPinFE è un pacchetto PyInstaller con un processo figlio,
-/// che con un kill secco resterebbe vivo.
-fn stop(mut child: Child) {
-    #[cfg(windows)]
-    let _ = Command::new("taskkill").args(["/PID", &child.id().to_string(), "/T", "/F"]).status();
-    #[cfg(not(windows))]
-    let _ = Command::new("kill").args(["-TERM", &child.id().to_string()]).status();
-    let _ = child.wait();
-}
-
-fn has_tables(paths: &Paths) -> bool {
-    library::count(paths) > 0
-}
-
-fn manager_url(paths: &Paths) -> (u16, String) {
-    let port = std::fs::read_to_string(paths.vpinfe_ini())
-        .ok()
-        .and_then(|text| ini::get(&text, "Network", "manageruiport"))
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(8001);
-    (port, format!("http://localhost:{port}/"))
+    metadata::prepare_new(paths, report);
+    metadata::mark_pinmame(paths, report);
+    Ok(vpx)
 }
 
 const FALLBACK_SCREEN: (u32, u32) = (1920, 1080);
@@ -146,26 +79,14 @@ struct State {
     result: Option<Result<PathBuf, String>>,
 }
 
-/// VPinFE avviato senza libreria perché non c'è ancora nessun tavolo da mostrare.
-struct Import {
-    child: Child,
-    vpinfe: PathBuf,
-    url: String,
-    /// La pagina di gestione risponde.
-    ready: Arc<AtomicBool>,
-    opened: bool,
-}
-
 struct App {
     /// `None` finché l'utente non ha scelto la cartella dati.
     paths: Option<Arc<Paths>>,
     state: Arc<Mutex<State>>,
     folder: String,
     folder_error: Option<String>,
-    import: Option<Import>,
     started: bool,
-    /// VPinFE è partito e la finestra si sta chiudendo: non c'è altro da fare.
-    launched: bool,
+    library: Option<frontend::Library>,
     opened_at: Instant,
 }
 
@@ -189,25 +110,22 @@ impl App {
         });
     }
 
-    fn fail(&self, error: anyhow::Error) {
-        self.state.lock().unwrap().result = Some(Err(format!("{error:#}")));
-    }
-
     /// Primo avvio: chiede dove mettere la cartella che conterrà tutto.
     fn choose_folder(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
-        ui.label("Dove vuoi tenere tavoli, ROM e programmi?");
-        ui.small("Tutto finisce in questa cartella: cancellandola si rimuove ogni cosa.");
-        ui.add_space(8.0);
+        ui.label(RichText::new("Dove vuoi tenere tavoli, ROM e programmi?").font(theme::bold(19.0)));
+        ui.label(RichText::new("Tutto finisce in questa cartella: cancellandola si rimuove ogni cosa.").color(theme::TEXT_WEAK));
+        ui.add_space(14.0);
         ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.folder).desired_width(330.0));
+            ui.add(egui::TextEdit::singleline(&mut self.folder).desired_width(ui.available_width() - 100.0));
             if ui.button("Sfoglia…").clicked() {
                 if let Some(picked) = rfd::FileDialog::new().pick_folder() {
                     self.folder = Paths::root_for_picked(picked).display().to_string();
                 }
             }
         });
-        ui.add_space(8.0);
-        if ui.button("Continua").clicked() {
+        ui.add_space(14.0);
+        let next = widgets::button(ui, "Continua", theme::bold(17.0), ButtonKind::Primary, egui::vec2(160.0, 40.0));
+        if next.clicked() {
             match Paths::choose(PathBuf::from(self.folder.trim())) {
                 Ok(paths) => {
                     self.paths = Some(Arc::new(paths));
@@ -217,101 +135,26 @@ impl App {
             }
         }
         if let Some(error) = &self.folder_error {
-            ui.colored_label(egui::Color32::LIGHT_RED, error);
-        }
-    }
-
-    /// Apre la libreria e chiude il launcher. Dopo la richiesta di chiusura la finestra
-    /// disegna ancora un fotogramma: `launched` evita che VPinFE parta una seconda volta.
-    fn launch_and_close(&mut self, ctx: &egui::Context, paths: &Paths, vpinfe: &Path) {
-        match launch(paths, vpinfe, false) {
-            Ok(_) => {
-                self.launched = true;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
-            Err(e) => self.fail(e),
-        }
-    }
-
-    /// Con dei tavoli apre la libreria e chiude il launcher. Senza tavoli la libreria
-    /// sarebbe una schermata vuota: si apre invece la pagina da cui importarli.
-    fn open_vpinfe(&mut self, ctx: &egui::Context, paths: &Paths, vpinfe: PathBuf) {
-        if has_tables(paths) {
-            self.launch_and_close(ctx, paths, &vpinfe);
-            return;
-        }
-        let child = match launch(paths, &vpinfe, true) {
-            Ok(child) => child,
-            Err(e) => return self.fail(e),
-        };
-        let (port, url) = manager_url(paths);
-        let ready = Arc::new(AtomicBool::new(false));
-        let (flag, ctx) = (ready.clone(), ctx.clone());
-        std::thread::spawn(move || {
-            for _ in 0..120 {
-                if TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_ok() {
-                    flag.store(true, Ordering::Relaxed);
-                    ctx.request_repaint();
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(500));
-            }
-        });
-        self.import = Some(Import { child, vpinfe, url, ready, opened: false });
-    }
-
-    fn import_screen(&mut self, ctx: &egui::Context, ui: &mut egui::Ui, paths: &Paths) {
-        let Some(import) = &mut self.import else { return };
-        let ready = import.ready.load(Ordering::Relaxed);
-        if ready && !import.opened {
-            import.opened = true;
-            ctx.open_url(egui::OpenUrl::new_tab(&import.url));
-        }
-        ui.label("Non ci sono ancora tavoli.");
-        if !ready {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label("Apro la pagina per importarli…");
-            });
-            return;
-        }
-        ui.label("Nel browser si è aperta la pagina di VPinFE: trascina lì i file dei tavoli (.vpx, backglass, ROM, PUP pack).");
-        ui.add_space(8.0);
-        let mut play = false;
-        ui.horizontal(|ui| {
-            play = ui.button("Ho finito, apri la libreria").clicked();
-            if ui.button("Riapri la pagina").clicked() {
-                ctx.open_url(egui::OpenUrl::new_tab(&import.url));
-            }
-        });
-        if play {
-            if let Some(import) = self.import.take() {
-                stop(import.child);
-                self.launch_and_close(ctx, paths, &import.vpinfe);
-            }
+            ui.colored_label(theme::ERROR, error);
         }
     }
 
     fn progress(&mut self, ctx: &egui::Context, ui: &mut egui::Ui, paths: &Paths) {
-        let (text, fraction, result) = {
-            let s = self.state.lock().unwrap();
-            (s.text.clone(), s.fraction, s.result.clone())
-        };
-        match result {
+        let state = self.state.lock().unwrap();
+        match &state.result {
             None => {
-                ui.label(text);
-                ui.add_space(8.0);
-                match fraction {
+                ui.label(&state.text);
+                ui.add_space(10.0);
+                match state.fraction {
                     Some(f) => ui.add(egui::ProgressBar::new(f).show_percentage()),
-                    None => ui.add(egui::Spinner::new()),
+                    None => ui.add(egui::Spinner::new().size(26.0)),
                 };
             }
-            Some(Ok(_)) if self.launched => {}
-            Some(Ok(_)) if self.import.is_some() => self.import_screen(ctx, ui, paths),
-            Some(Ok(vpinfe)) => self.open_vpinfe(ctx, paths, vpinfe),
+            Some(Ok(_)) => {}
             Some(Err(message)) => {
-                ui.colored_label(egui::Color32::LIGHT_RED, message);
-                ui.add_space(8.0);
+                ui.colored_label(theme::ERROR, message);
+                ui.add_space(10.0);
+                drop(state);
                 ui.horizontal(|ui| {
                     if ui.button("Riprova").clicked() {
                         self.start(ctx);
@@ -322,51 +165,71 @@ impl App {
                 });
             }
         }
-        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-            ui.small(format!("Cartella: {}", paths.root.display()));
-        });
+        ui.add_space(20.0);
+        ui.label(RichText::new(format!("Cartella: {}", paths.root.display())).small().color(theme::TEXT_WEAK));
+    }
+
+    /// Quando la preparazione è finita la finestra diventa la libreria.
+    fn open_library(&mut self, ctx: &egui::Context) {
+        let Some(paths) = &self.paths else { return };
+        let engine = match &self.state.lock().unwrap().result {
+            Some(Ok(engine)) => engine.clone(),
+            _ => return,
+        };
+        self.library = Some(frontend::Library::new(ctx, paths.clone(), engine));
     }
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.library.is_none() {
+            self.open_library(ctx);
+        }
+        if let Some(library) = &mut self.library {
+            library.show(ctx);
+            return;
+        }
         // Si parte quando è nota la risoluzione del monitor, che serve per creare
         // VPinballX.ini; se non arriva si prosegue lo stesso con quella di ripiego.
-        if !self.started {
+        if !self.started && self.paths.is_some() {
             if screen_size(ctx).is_some() || self.opened_at.elapsed() >= SCREEN_WAIT {
                 self.start(ctx);
             } else {
                 ctx.request_repaint_after(Duration::from_millis(50));
             }
         }
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.add_space(12.0);
-            ui.heading("Pinball AIO");
-            ui.add_space(12.0);
-            match self.paths.clone() {
-                Some(paths) => self.progress(ctx, ui, &paths),
-                None => self.choose_folder(ctx, ui),
-            }
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::BACKGROUND)).show(ctx, |ui| {
+            let width = 600.0_f32.min(ui.available_width() - 32.0);
+            ui.add_space((ui.available_height() / 2.0 - 200.0).max(16.0));
+            ui.vertical_centered(|ui| {
+                let mut logo = egui::text::LayoutJob::default();
+                logo.append("PINBALL ", 0.0, egui::TextFormat::simple(theme::display(72.0), theme::TEXT));
+                logo.append("AIO", 0.0, egui::TextFormat::simple(theme::display(72.0), theme::ACCENT));
+                ui.label(logo);
+                ui.add_space(16.0);
+            });
+            ui.vertical_centered(|ui| {
+                egui::Frame::new().fill(theme::SIDEBAR).corner_radius(16).inner_margin(28).show(ui, |ui| {
+                    ui.set_width(width - 56.0);
+                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| match self.paths.clone() {
+                        Some(paths) => self.progress(ctx, ui, &paths),
+                        None => self.choose_folder(ctx, ui),
+                    });
+                });
+            });
         });
-    }
-
-    /// Chiudendo la finestra durante l'import non deve restare VPinFE in background.
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        if let Some(import) = self.import.take() {
-            stop(import.child);
-        }
     }
 }
 
-/// `--cli`: stesso lavoro senza finestra, con l'avanzamento sul terminale.
-/// `--no-launch` (solo con `--cli`): aggiorna e configura senza avviare VPinFE.
-fn run_cli(paths: &Paths, launch_after: bool) -> Result<()> {
-    let vpinfe = prepare(paths, FALLBACK_SCREEN, &|p| eprintln!("{}", p.text))?;
-    if launch_after {
-        if !has_tables(paths) {
-            eprintln!("Nessun tavolo: importali dalla pagina {}", manager_url(paths).1);
-        }
-        launch(paths, &vpinfe, false)?;
+/// `--cli`: aggiorna, configura e prepara i tavoli senza finestra, con l'avanzamento
+/// sul terminale.
+fn run_cli(paths: &Paths) -> Result<()> {
+    prepare(paths, FALLBACK_SCREEN, &|p| eprintln!("{}", p.text))?;
+    let tables = catalog::load_all(paths);
+    let unrecognized: Vec<&str> = tables.iter().filter(|t| !t.has_info).map(|t| t.folder.as_str()).collect();
+    eprintln!("{} tavoli, {} non riconosciuti", tables.len(), unrecognized.len());
+    for folder in unrecognized {
+        eprintln!("  non riconosciuto: {folder}");
     }
     Ok(())
 }
@@ -376,7 +239,7 @@ fn main() {
     let paths = Paths::detect();
     if args.iter().any(|a| a == "--cli") {
         let result = match &paths {
-            Some(paths) => run_cli(paths, !args.iter().any(|a| a == "--no-launch")),
+            Some(paths) => run_cli(paths),
             None => Err(anyhow!("cartella dati non scelta: imposta PINBALL_AIO_DIR")),
         };
         if let Err(e) = result {
@@ -388,8 +251,11 @@ fn main() {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([480.0, 220.0])
-            .with_resizable(false)
+            .with_title("Pinball AIO")
+            .with_app_id("pinball-aio")
+            .with_inner_size([1280.0, 800.0])
+            .with_min_inner_size([760.0, 480.0])
+            .with_maximized(true)
             .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../assets/vpinball.png")).unwrap_or_default()),
         ..Default::default()
     };
@@ -398,15 +264,17 @@ fn main() {
         state: Arc::default(),
         folder: Paths::default_root().display().to_string(),
         folder_error: None,
-        import: None,
         started: false,
-        launched: false,
+        library: None,
         opened_at: Instant::now(),
     };
     let result = eframe::run_native(
         "Pinball AIO",
         options,
-        Box::new(move |_cc| Ok(Box::new(app))),
+        Box::new(move |cc| {
+            theme::install(&cc.egui_ctx);
+            Ok(Box::new(app))
+        }),
     );
     if let Err(e) = result {
         eprintln!("Errore: {e}");
